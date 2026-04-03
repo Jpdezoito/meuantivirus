@@ -1,4 +1,4 @@
-"""SentinelaPC Mobile — antivirus para Android usando Flet."""
+"""SentinelaPC Mobile — antivirus para Android usando Flet 0.84+."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Callable
 
 import flet as ft
+from flet import FilePicker
 
 
 # ── Modelos ────────────────────────────────────────────────────────────────────
@@ -199,7 +200,7 @@ def _risk_chip(risk: RiskLevel) -> ft.Container:
 
 # ── App ────────────────────────────────────────────────────────────────────────
 
-def main(page: ft.Page) -> None:
+async def main(page: ft.Page) -> None:
     page.title       = "SentinelaPC Mobile"
     page.bgcolor     = BG
     page.padding     = 0
@@ -228,13 +229,13 @@ def main(page: ft.Page) -> None:
     results_list    = ft.ListView(spacing=8, expand=True, padding=ft.padding.symmetric(horizontal=16))
 
     scan_btn        = ft.ElevatedButton(
-        "Iniciar verificacao",
+        content="Iniciar verificacao",
         icon=ft.Icons.PLAY_ARROW_ROUNDED,
         bgcolor=ACCENT, color=TEXT1,
         height=52, expand=True,
     )
     stop_btn        = ft.ElevatedButton(
-        "Parar",
+        content="Parar",
         icon=ft.Icons.STOP_ROUNDED,
         bgcolor=DANGER, color=TEXT1,
         height=52, visible=False,
@@ -247,7 +248,7 @@ def main(page: ft.Page) -> None:
         hash_lbl = ft.Text("", size=10, color=TEXT2, selectable=True, expand=True)
         key = str(result.path)
 
-        def _calc_hash(_e: ft.ControlEvent) -> None:
+        def _calc_hash() -> None:
             if key not in _hashes:
                 hash_lbl.value = "Calculando..."
                 page.update()
@@ -255,41 +256,29 @@ def main(page: ft.Page) -> None:
             hash_lbl.value = _hashes[key]
             page.update()
 
-        return _card(
-            ft.Column(
-                [
-                    ft.Row(
-                        [
-                            ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED,
-                                    color=RISK_COLORS.get(result.risk_level, WARNING), size=18),
-                            ft.Text(result.name, size=13, weight=ft.FontWeight.W_600,
-                                    color=TEXT1, expand=True, overflow=ft.TextOverflow.ELLIPSIS),
-                            _risk_chip(result.risk_level),
-                        ],
-                        spacing=8,
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-                    ),
-                    ft.Text(str(result.path), size=10, color=TEXT2, overflow=ft.TextOverflow.ELLIPSIS),
-                    ft.Text(f"Score: {result.score}", size=11, color=TEXT2),
-                    ft.Text(reasons_text, size=11, color=TEXT2),
-                    ft.Row(
-                        [
-                            ft.TextButton(
-                                "Calcular SHA-256",
-                                style=ft.ButtonStyle(color=ACCENT),
-                                on_click=_calc_hash,
-                            ),
-                            hash_lbl,
-                        ],
-                        spacing=6,
-                        wrap=True,
-                    ),
-                ],
-                spacing=5,
-                tight=True,
+        row_top: list[ft.Control] = [
+            ft.Icon(ft.Icons.WARNING_AMBER_ROUNDED,
+                    color=RISK_COLORS.get(result.risk_level, WARNING), size=18),
+            ft.Text(result.name, size=13, weight=ft.FontWeight.W_600,
+                    color=TEXT1, expand=True, overflow=ft.TextOverflow.ELLIPSIS),
+            _risk_chip(result.risk_level),
+        ]
+        row_hash: list[ft.Control] = [
+            ft.TextButton(
+                content="Calcular SHA-256",
+                style=ft.ButtonStyle(color=ACCENT),
+                on_click=_calc_hash,
             ),
-            padding=14,
-        )
+            hash_lbl,
+        ]
+        col_controls: list[ft.Control] = [
+            ft.Row(row_top, spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            ft.Text(str(result.path), size=10, color=TEXT2, overflow=ft.TextOverflow.ELLIPSIS),
+            ft.Text(f"Score: {result.score}", size=11, color=TEXT2),
+            ft.Text(reasons_text, size=11, color=TEXT2),
+            ft.Row(row_hash, spacing=6, wrap=True),
+        ]
+        return _card(ft.Column(col_controls, spacing=5, tight=True), padding=14)
 
     # ── Logica do scan ────────────────────────────────────────────────────
 
@@ -320,7 +309,7 @@ def main(page: ft.Page) -> None:
         _is_scanning[0]     = False
         page.update()
 
-    def _start_scan(_e: ft.ControlEvent) -> None:
+    def _start_scan() -> None:
         if _is_scanning[0]:
             return
         if _sel_dir[0] is None:
@@ -342,7 +331,7 @@ def main(page: ft.Page) -> None:
         page.update()
         threading.Thread(target=_run_scan, daemon=True).start()
 
-    def _stop_scan(_e: ft.ControlEvent) -> None:
+    def _stop_scan() -> None:
         _cancel[0] = True
         status_txt.value = "Parando verificacao..."
         page.update()
@@ -352,14 +341,15 @@ def main(page: ft.Page) -> None:
 
     # ── Seletor de pasta ──────────────────────────────────────────────────
 
-    def _on_dir_picked(e: ft.FilePickerResultEvent) -> None:
-        if e.path:
-            _sel_dir[0] = Path(e.path)
-            dir_txt.value = e.path
-        page.update()
-
-    file_picker = ft.FilePicker(on_result=_on_dir_picked)
+    file_picker = FilePicker()
     page.overlay.append(file_picker)
+
+    async def _pick_directory() -> None:
+        path = await file_picker.get_directory_path(dialog_title="Selecione a pasta para verificar")
+        if path:
+            _sel_dir[0] = Path(path)
+            dir_txt.value = path
+        page.update()
 
     # ── Layout ────────────────────────────────────────────────────────────
 
@@ -393,9 +383,7 @@ def main(page: ft.Page) -> None:
                             ft.Icons.FOLDER_OPEN_ROUNDED,
                             icon_color=ACCENT,
                             tooltip="Selecionar pasta",
-                            on_click=lambda _e: file_picker.get_directory_path(
-                                dialog_title="Selecione a pasta para verificar"
-                            ),
+                            on_click=lambda: _pick_directory(),
                         ),
                     ],
                     spacing=4,
