@@ -52,10 +52,25 @@ def initialize_database(database_file: Path) -> None:
                 summary TEXT NOT NULL,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
+
+            CREATE TABLE IF NOT EXISTS action_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                action_id TEXT NOT NULL,
+                action_title TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                target_summary TEXT DEFAULT '',
+                requires_admin INTEGER DEFAULT 0,
+                decision TEXT DEFAULT '',
+                status TEXT DEFAULT '',
+                details TEXT DEFAULT '',
+                correlation_id TEXT DEFAULT '',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
             """
         )
         _migrate_scan_history_table(cursor)
         _migrate_quarantine_table(cursor)
+        _migrate_action_events_table(cursor)
         connection.commit()
 
 
@@ -143,4 +158,47 @@ def _migrate_quarantine_table(cursor: sqlite3.Cursor) -> None:
     )
     cursor.execute(
         "UPDATE quarantine_items SET status = COALESCE(status, 'quarantined') WHERE status IS NULL"
+    )
+
+
+def _migrate_action_events_table(cursor: sqlite3.Cursor) -> None:
+    """Atualiza a tabela de eventos de acao quando o banco ja existe."""
+    existing_columns = {
+        row[1]
+        for row in cursor.execute("PRAGMA table_info(action_events)").fetchall()
+    }
+
+    required_columns = {
+        "target_summary": "TEXT DEFAULT ''",
+        "requires_admin": "INTEGER DEFAULT 0",
+        "decision": "TEXT DEFAULT ''",
+        "status": "TEXT DEFAULT ''",
+        "details": "TEXT DEFAULT ''",
+        "correlation_id": "TEXT DEFAULT ''",
+    }
+
+    for column_name, column_definition in required_columns.items():
+        if column_name in existing_columns:
+            continue
+        cursor.execute(
+            f"ALTER TABLE action_events ADD COLUMN {column_name} {column_definition}"
+        )
+
+    cursor.execute(
+        "UPDATE action_events SET target_summary = COALESCE(target_summary, '') WHERE target_summary IS NULL"
+    )
+    cursor.execute(
+        "UPDATE action_events SET requires_admin = COALESCE(requires_admin, 0) WHERE requires_admin IS NULL"
+    )
+    cursor.execute(
+        "UPDATE action_events SET decision = COALESCE(decision, '') WHERE decision IS NULL"
+    )
+    cursor.execute(
+        "UPDATE action_events SET status = COALESCE(status, '') WHERE status IS NULL"
+    )
+    cursor.execute(
+        "UPDATE action_events SET details = COALESCE(details, '') WHERE details IS NULL"
+    )
+    cursor.execute(
+        "UPDATE action_events SET correlation_id = COALESCE(correlation_id, '') WHERE correlation_id IS NULL"
     )

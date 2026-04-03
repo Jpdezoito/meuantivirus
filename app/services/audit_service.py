@@ -2075,7 +2075,7 @@ class AuditService:
     def _email_item_to_finding(self, item: EmailScanItem) -> AuditFinding:
         severity, status = self._map_risk_to_audit(item.score, item.risk_level, item.classification)
         evidence = [
-            f"Arquivo: {item.source_file}",
+            f"Origem: {item.source_label or item.source_file}",
             f"Remetente: {item.sender}",
             f"Assunto: {item.subject}",
             f"Links encontrados: {item.links_found}",
@@ -2084,7 +2084,11 @@ class AuditService:
         evidence.extend(item.reasons)
         return AuditFinding(
             category=AuditCategory.EMAIL,
-            problem_name="E-mail exportado com sinais de phishing",
+            problem_name=(
+                "E-mail online com sinais de phishing"
+                if item.source_kind == "online"
+                else "E-mail exportado com sinais de phishing"
+            ),
             severity=severity,
             status=status,
             score=item.score,

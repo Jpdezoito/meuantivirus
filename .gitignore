@@ -16,6 +16,8 @@ logs/
 reports/
 quarantine/
 app/data/sentinela.db
+app/data/email_oauth/
+app/oauth/*.json
 
 # Build outputs
 build/

@@ -3,3 +3,5 @@
 PySide6>=6.8,<7.0
 psutil>=6.1,<8.0
 send2trash>=1.8,<2.0
+msal>=1.31,<2.0
+google-auth-oauthlib>=1.2,<2.0

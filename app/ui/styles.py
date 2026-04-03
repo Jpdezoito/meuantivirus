@@ -330,6 +330,32 @@ def build_stylesheet() -> str:
         border-color: #1e2f3e;
     }
 
+    QPushButton#dangerActionButton {
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #d55252, stop:1 #b83a3a);
+        color: #ffffff;
+        border: none;
+        border-radius: 10px;
+        padding: 11px 20px;
+        font-size: 12px;
+        font-weight: 700;
+        text-align: left;
+    }
+
+    QPushButton#dangerActionButton:hover {
+        background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #e26464, stop:1 #c94242);
+    }
+
+    QPushButton#dangerActionButton:pressed {
+        background: #a53131;
+    }
+
+    QPushButton#dangerActionButton:disabled {
+        background: #3a2323;
+        color: #7f8c98;
+    }
+
     /* ── Consoles e texto ────────────────────────────────── */
     QTextEdit#resultsConsole, QTextEdit#pageConsole {
         background-color: #0f1c28;
@@ -436,6 +462,49 @@ def build_stylesheet() -> str:
     QMessageBox QLabel {
         color: #c8dff0;
         background-color: transparent;
+    }
+
+    QDialog#confirmActionDialog,
+    QDialog#adminPermissionDialog {
+        background-color: #111827;
+        color: #f0f6ff;
+    }
+
+    QLabel#dialogTitle {
+        font-size: 20px;
+        font-weight: 700;
+        color: #f0f6ff;
+    }
+
+    QLabel#dialogSeverityLabel {
+        color: #35d0ff;
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 1.2px;
+        text-transform: uppercase;
+    }
+
+    QLabel#dialogBody {
+        color: #c8dff0;
+        font-size: 12px;
+    }
+
+    QLabel#dialogWarning {
+        color: #ffcc7a;
+        font-size: 11px;
+        font-weight: 600;
+    }
+
+    QDialog QLineEdit {
+        background-color: #0f1c28;
+        color: #f0f6ff;
+        border: 1px solid #2a3f55;
+        border-radius: 8px;
+        padding: 10px 12px;
+    }
+
+    QDialog QLineEdit:focus {
+        border-color: #3b9eff;
     }
 
     /* ── Separadores e frames auxiliares ─────────────────── */

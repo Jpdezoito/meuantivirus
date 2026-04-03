@@ -7,6 +7,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 from PySide6.QtCore import QThread, QTimer
 from PySide6.QtGui import QCloseEvent
@@ -27,12 +28,16 @@ from app.core.bootstrap import ApplicationContext
 from app.core.config import APP_NAME, APP_VERSION
 from app.data.history_models import HistoryRecordInput
 from app.data.history_repository import HistoryRepository
+from app.data.action_event_models import ActionEventRecordInput
+from app.data.action_event_repository import ActionEventRepository
 from app.services.browser_scan_models import BrowserScanReport
 from app.services.browser_security_service import BrowserSecurityService
 from app.services.audit_service import AuditService
 from app.services.audit_models import AuditReport, AuditStatus
 from app.services.diagnostics_models import SystemDiagnosticsReport
 from app.services.diagnostics_service import DiagnosticsService
+from app.services.email_account_models import EmailAccountError, EmailOAuthConfigurationError, EmailOAuthDependencyError, EmailProvider
+from app.services.email_account_service import EmailAccountService
 from app.services.email_scan_models import EmailScanReport
 from app.services.email_security_service import EmailSecurityService
 from app.services.file_scan_models import FileScanReport
@@ -47,6 +52,9 @@ from app.services.startup_scan_models import StartupScanReport
 from app.ui.navigation import SidebarNavigation
 from app.ui.pages import DashboardPage, HistoryPage, OperationPage, QuarantinePage, ReportsPage
 from app.ui.pages import AuditPage
+from app.ui.action_policy import ActionPolicy, ActionSeverity, build_action_policy
+from app.ui.browser_suspicious_dialog import BrowserSuspiciousItemsDialog
+from app.ui.confirmation_dialogs import AdminPermissionDialog, ConfirmActionDialog
 from app.ui.quarantine_dialogs import (
     ProcessQuarantineSelectionDialog,
     QuarantineSelectionDialog,
@@ -55,6 +63,7 @@ from app.ui.quarantine_dialogs import (
 from app.ui.workers import (
     BrowserScanWorker,
     DiagnosticsWorker,
+    EmailOnlineScanWorker,
     EmailScanWorker,
     FileScanWorker,
     ProcessScanWorker,
@@ -73,6 +82,12 @@ class MainWindow(QMainWindow):
         self.file_scanner = FileScannerService(context.logger, context.heuristic_engine)
         self.browser_security_service = BrowserSecurityService(context.logger, context.heuristic_engine)
         self.email_security_service = EmailSecurityService(context.logger, context.heuristic_engine)
+        self.email_account_service = EmailAccountService(
+            context.logger,
+            context.heuristic_engine,
+            context.paths.data_dir,
+            context.paths.resource_dir,
+        )
         # Adicionado: servico de auditoria avancada de seguranca.
         self.audit_service = AuditService(
             context.logger,
@@ -89,6 +104,7 @@ class MainWindow(QMainWindow):
         )
         self.report_service = ReportService(context.paths.reports_dir, context.logger)
         self.history_repository = HistoryRepository(context.paths.database_file)
+        self.action_event_repository = ActionEventRepository(context.paths.database_file)
 
         self.scan_thread: QThread | None = None
         self.scan_worker: FileScanWorker | None = None
@@ -101,7 +117,7 @@ class MainWindow(QMainWindow):
         self.browser_thread: QThread | None = None
         self.browser_worker: BrowserScanWorker | None = None
         self.email_thread: QThread | None = None
-        self.email_worker: EmailScanWorker | None = None
+        self.email_worker: EmailScanWorker | EmailOnlineScanWorker | None = None
         # Adicionado: thread e worker para auditoria avancada.
         self.audit_thread: QThread | None = None
         self.audit_worker: AuditWorker | None = None
@@ -125,6 +141,10 @@ class MainWindow(QMainWindow):
         self._is_diagnostics_paused = False
         self._is_browser_scan_paused = False
         self._is_email_scan_paused = False
+        self._active_email_scan_correlation_id: str | None = None
+        self._active_email_scan_summary = ""
+        self._active_email_scan_policy: ActionPolicy | None = None
+        self._connected_email_provider: EmailProvider | None = None
         # Adicionado: estado da auditoria avancada (sem pausa; apenas cancelamento).
         self._is_audit_running = False
         self._current_file_scan_analyzed = 0
@@ -196,6 +216,7 @@ class MainWindow(QMainWindow):
             "Analise local de executaveis, extensoes, sinais de hijack e downloads perigosos sem acessar dados privados.",
             [
                 ("browser_scan", "Analisar navegadores"),
+                ("browser_view_suspicious", "Ver itens suspeitos"),
                 ("pause_browser_scan", "Pausar / retomar scan"),
                 ("stop_browser_scan", "Parar scan"),
             ],
@@ -203,8 +224,13 @@ class MainWindow(QMainWindow):
         self.emails_page = OperationPage(
             "Protecao de mensagens",
             "E-mails",
-            "Analise local de e-mails exportados e anexos para sinais de phishing e arquivos perigosos, sem acessar contas.",
+            "Conecte Gmail ou Outlook com OAuth somente leitura e analise mensagens online ou arquivos exportados em busca de phishing e anexos perigosos.",
             [
+                ("email_oauth_help", "Como configurar OAuth"),
+                ("email_connect_gmail", "Conectar Gmail"),
+                ("email_connect_outlook", "Conectar Outlook"),
+                ("email_scan_online", "Analisar caixa online"),
+                ("email_disconnect_account", "Desconectar conta"),
                 ("email_scan_file", "Analisar e-mails (arquivo)"),
                 ("email_scan_folder", "Analisar e-mails (pasta)"),
                 ("pause_email_scan", "Pausar / retomar scan"),
@@ -357,6 +383,9 @@ class MainWindow(QMainWindow):
         if action_key == "browser_scan":
             self._start_browser_scan()
             return
+        if action_key == "browser_view_suspicious":
+            self._show_browser_suspicious_items()
+            return
         if action_key == "pause_browser_scan":
             self._toggle_browser_scan_pause()
             return
@@ -365,6 +394,21 @@ class MainWindow(QMainWindow):
             return
         if action_key == "email_scan_file":
             self._start_email_scan_file()
+            return
+        if action_key == "email_oauth_help":
+            self._show_email_oauth_setup_guide()
+            return
+        if action_key == "email_connect_gmail":
+            self._connect_email_provider(EmailProvider.GMAIL)
+            return
+        if action_key == "email_connect_outlook":
+            self._connect_email_provider(EmailProvider.OUTLOOK)
+            return
+        if action_key == "email_scan_online":
+            self._start_email_online_scan()
+            return
+        if action_key == "email_disconnect_account":
+            self._disconnect_email_provider()
             return
         if action_key == "email_scan_folder":
             self._start_email_scan_folder()
@@ -487,19 +531,36 @@ class MainWindow(QMainWindow):
             return
 
         target_directory = Path(self.context.paths.base_dir.anchor) if self.context.paths.base_dir.anchor else Path.home()
-        confirmation = QMessageBox.question(
-            self,
-            "Confirmar verificacao completa",
-            (
-                "A verificacao completa pode levar bastante tempo e tentar acessar muitas pastas protegidas do Windows.\n\n"
-                f"Deseja iniciar a analise em: {target_directory}?"
+        policy = build_action_policy(
+            action_id="full_scan_start",
+            title="Iniciar verificacao completa",
+            description=(
+                "A verificacao completa pode levar bastante tempo, percorrer muitas pastas e gerar erros de acesso esperados em areas protegidas do Windows."
             ),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            severity=ActionSeverity.HIGH,
+            confirm_label="Iniciar verificacao completa",
+            detail_lines=(
+                "A operacao tenta ler toda a raiz do disco atual.",
+                "Durante a analise, outros scans nao poderao ser iniciados.",
+                "Erros de acesso sao registrados em log e nao interrompem o processo por si so.",
+            ),
         )
-        if confirmation != QMessageBox.StandardButton.Yes:
+        correlation_id = self._confirm_sensitive_action(
+            policy,
+            target_summary=f"Destino da analise: {target_directory}",
+        )
+        if correlation_id is None:
             self._append_to_page("files", ["[Scanner] Verificacao completa cancelada pelo usuario."])
             return
+
+        self._record_action_event(
+            policy,
+            target_summary=str(target_directory),
+            decision="approved",
+            status="started",
+            details="Verificacao completa iniciada pela interface.",
+            correlation_id=correlation_id,
+        )
 
         self._start_file_scan(
             target_directory=target_directory,
@@ -791,6 +852,28 @@ class MainWindow(QMainWindow):
         self._append_to_page("browsers", ["[Navegadores] Interrupcao solicitada. Encerrando no proximo ponto seguro..."])
         self.statusBar().showMessage("Interrupcao solicitada para analise de navegadores.")
 
+    def _show_browser_suspicious_items(self) -> None:
+        """Abre dialogo com tabela e acoes rapidas para os suspeitos do ultimo scan de navegadores."""
+        report = self.last_browser_scan_report
+        if report is None:
+            QMessageBox.information(
+                self,
+                "Sem dados",
+                "Execute a analise de navegadores primeiro para visualizar os itens suspeitos.",
+            )
+            return
+
+        if not report.results:
+            QMessageBox.information(
+                self,
+                "Nenhum item suspeito",
+                "O ultimo scan de navegadores nao encontrou itens suspeitos.",
+            )
+            return
+
+        dialog = BrowserSuspiciousItemsDialog(list(report.results), self)
+        dialog.exec()
+
     def _start_email_scan_file(self) -> None:
         """Inicia analise local de um ou mais arquivos de e-mail selecionados."""
         selected_files, _ = QFileDialog.getOpenFileNames(
@@ -818,11 +901,229 @@ class MainWindow(QMainWindow):
 
         self._start_email_scan([Path(selected_directory)], "pasta selecionada")
 
+    def _connect_email_provider(self, provider: EmailProvider) -> None:
+        """Solicita consentimento e inicia a conexao OAuth com Gmail ou Outlook."""
+        if self._has_active_background_task():
+            self._append_to_page("emails", ["[E-mails] Aguarde o termino da operacao atual antes de conectar uma conta online."])
+            return
+
+        status = self.email_account_service.get_status(provider)
+        if not status.config_present:
+            self._show_email_oauth_setup_guide(provider)
+            self._append_to_page(
+                "emails",
+                [f"[E-mails] Configuracao OAuth de {provider.value.capitalize()} ausente. Guia de setup exibido ao usuario."],
+            )
+            return
+
+        policy = build_action_policy(
+            action_id=f"email_connect_{provider.value}",
+            title=f"Autorizar conexao online com {provider.value.capitalize()}",
+            description=(
+                "O SentinelaPC vai abrir o fluxo OAuth do provedor para solicitar acesso somente leitura aos e-mails da conta escolhida."
+            ),
+            severity=ActionSeverity.SENSITIVE,
+            confirm_label="Continuar com OAuth",
+            detail_lines=(
+                "A autenticacao ocorre no provedor oficial, nao dentro do app.",
+                "O acesso solicitado e de leitura de e-mails, sem envio nem alteracao da caixa.",
+                "Voce podera desconectar a conta depois no proprio SentinelaPC.",
+            ),
+        )
+        target_summary = f"Provedor escolhido: {provider.value.capitalize()}"
+        correlation_id = self._confirm_sensitive_action(policy, target_summary=target_summary)
+        if correlation_id is None:
+            self._append_to_page("emails", [f"[E-mails] Conexao com {provider.value.capitalize()} cancelada antes do OAuth."])
+            return
+
+        try:
+            status = self.email_account_service.connect(provider)
+        except (EmailOAuthConfigurationError, EmailOAuthDependencyError, EmailAccountError) as error:
+            self._record_action_event(policy, target_summary, "approved", "failed", str(error), correlation_id)
+            QMessageBox.warning(self, "Falha ao conectar conta", str(error))
+            self._append_to_page("emails", [f"[E-mails] Falha ao conectar {provider.value.capitalize()}: {error}"])
+            return
+        except Exception as error:
+            self._record_action_event(policy, target_summary, "approved", "failed", f"Erro inesperado: {error}", correlation_id)
+            log_error(self.context.logger, "Falha inesperada ao conectar conta de e-mail online.", error)
+            QMessageBox.critical(self, "Falha ao conectar conta", f"Nao foi possivel concluir a conexao OAuth: {error}")
+            return
+
+        self._connected_email_provider = provider if status.connected else None
+        account_label = status.account_label or provider.value.capitalize()
+        self._record_action_event(policy, target_summary, "approved", "succeeded", f"Conta conectada: {account_label}", correlation_id)
+        self._append_to_page("emails", [f"[E-mails] Conta online conectada com sucesso: {account_label}"])
+        self.statusBar().showMessage(f"Conta {provider.value.capitalize()} conectada com sucesso.")
+
+    def _show_email_oauth_setup_guide(self, provider: EmailProvider | None = None) -> None:
+        """Exibe um guia rapido para configurar OAuth de Gmail e Outlook."""
+        guide_title = "Como configurar OAuth para e-mails online"
+        provider_label = "Gmail e Outlook"
+        provider_steps = (
+            "1. Abra a pasta app/oauth do projeto.\n"
+            "2. Use os arquivos .example.json como modelo.\n"
+            "3. Crie seus arquivos reais gmail_oauth_client.json e/ou outlook_oauth_client.json.\n"
+            "4. Volte ao SentinelaPC e clique em conectar conta."
+        )
+
+        if provider == EmailProvider.GMAIL:
+            provider_label = "Gmail"
+            provider_steps = (
+                "1. No Google Cloud Console, crie um projeto ou use um existente.\n"
+                "2. Ative a Gmail API.\n"
+                "3. Crie uma credencial OAuth Client ID do tipo Desktop App.\n"
+                "4. Salve o JSON em app/oauth/gmail_oauth_client.json usando o arquivo .example.json como referencia.\n"
+                "5. Volte ao app e clique em Conectar Gmail."
+            )
+        elif provider == EmailProvider.OUTLOOK:
+            provider_label = "Outlook"
+            provider_steps = (
+                "1. No Microsoft Entra Admin Center, registre um aplicativo.\n"
+                "2. Permita conta pessoal/organizacional conforme sua necessidade.\n"
+                "3. Adicione permissoes delegadas User.Read e Mail.Read.\n"
+                "4. Copie o client_id para app/oauth/outlook_oauth_client.json usando o arquivo .example.json como referencia.\n"
+                "5. Volte ao app e clique em Conectar Outlook."
+            )
+
+        message = (
+            f"Provedor: {provider_label}\n\n"
+            f"{provider_steps}\n\n"
+            "Arquivos de apoio no projeto:\n"
+            "- app/oauth/README.md\n"
+            "- app/oauth/gmail_oauth_client.example.json\n"
+            "- app/oauth/outlook_oauth_client.example.json\n\n"
+            "Escopo usado pelo SentinelaPC: somente leitura de e-mails."
+        )
+        QMessageBox.information(self, guide_title, message)
+
+    def _disconnect_email_provider(self) -> None:
+        """Desconecta a conta online atualmente selecionada no modulo de e-mails."""
+        provider = self._connected_email_provider or self._resolve_connected_email_provider()
+        if provider is None:
+            QMessageBox.information(self, "Sem conta conectada", "Nenhuma conta online de e-mail esta conectada no momento.")
+            return
+
+        policy = build_action_policy(
+            action_id="email_disconnect_account",
+            title="Desconectar conta online de e-mail",
+            description="Os tokens locais da conta serao removidos do computador e o app deixara de acessar a caixa online ate nova autenticacao.",
+            severity=ActionSeverity.SENSITIVE,
+            confirm_label="Desconectar conta",
+        )
+        target_summary = f"Conta conectada: {provider.value.capitalize()}"
+        correlation_id = self._confirm_sensitive_action(policy, target_summary=target_summary)
+        if correlation_id is None:
+            return
+
+        status = self.email_account_service.disconnect(provider)
+        self._connected_email_provider = None if not status.connected else provider
+        self._record_action_event(policy, target_summary, "approved", "succeeded", "Tokens locais removidos com sucesso.", correlation_id)
+        self._append_to_page("emails", [f"[E-mails] Conta {provider.value.capitalize()} desconectada do aplicativo."])
+        self.statusBar().showMessage(f"Conta {provider.value.capitalize()} desconectada.")
+
+    def _start_email_online_scan(self) -> None:
+        """Executa a analise online read-only da caixa de e-mails conectada."""
+        if self._has_active_background_task():
+            self._append_to_page("emails", ["[E-mails] Ja existe uma operacao em andamento."])
+            return
+
+        provider = self._connected_email_provider or self._resolve_connected_email_provider()
+        if provider is None:
+            QMessageBox.information(
+                self,
+                "Conta nao conectada",
+                "Conecte primeiro uma conta Gmail ou Outlook para analisar a caixa online.",
+            )
+            return
+
+        target_summary = f"Leitura online da caixa conectada: {provider.value.capitalize()}"
+        policy = build_action_policy(
+            action_id="email_scan_online_inbox",
+            title="Autorizar leitura online da caixa de e-mails",
+            description="O SentinelaPC vai consultar a caixa online em modo somente leitura para analisar mensagens recentes em busca de phishing e anexos suspeitos.",
+            severity=ActionSeverity.SENSITIVE,
+            confirm_label="Ler caixa online",
+            detail_lines=(
+                "A leitura ocorre com escopo somente leitura.",
+                "Nenhuma mensagem sera enviada, movida ou apagada.",
+                "A verificacao foca em remetente, assunto, links, anexos e indicadores de phishing.",
+            ),
+        )
+        correlation_id = self._confirm_sensitive_action(policy, target_summary=target_summary)
+        if correlation_id is None:
+            self._append_to_page("emails", ["[E-mails] Leitura online cancelada antes da abertura da caixa."])
+            return
+
+        self._active_email_scan_policy = policy
+        self._active_email_scan_correlation_id = correlation_id
+        self._active_email_scan_summary = target_summary
+        self._record_action_event(policy, target_summary, "approved", "started", "Analise online da caixa iniciada apos consentimento do usuario.", correlation_id)
+
+        self._prepare_operation_page(
+            "emails",
+            [
+                "[E-mails Online] Analise da caixa online iniciada.",
+                f"[E-mails Online] Provedor conectado: {provider.value.capitalize()}",
+                "[E-mails Online] Lendo mensagens recentes em modo somente leitura...",
+            ],
+        )
+        self.emails_page.update_summary(0, 0, datetime.now().strftime("%H:%M:%S"))
+        self.statusBar().showMessage(f"Executando analise online de e-mails em {provider.value.capitalize()}...")
+        self._set_busy_actions(False)
+        self._is_email_scan_paused = False
+        self._start_visual_progress("emails", "Analise online de e-mails")
+        self._set_email_scan_control_actions(True)
+
+        self.email_thread = QThread(self)
+        self.email_worker = EmailOnlineScanWorker(self.email_account_service, provider)
+        self.email_worker.moveToThread(self.email_thread)
+        self._connect_background_worker(
+            thread=self.email_thread,
+            worker=self.email_worker,
+            success_handler=self._handle_email_scan_finished,
+            failure_handler=self._handle_email_scan_failed,
+            cleanup_handler=self._cleanup_email_thread,
+        )
+        self.email_thread.start()
+
     def _start_email_scan(self, sources: list[Path], origin_label: str) -> None:
         """Executa analise local de e-mails em background."""
         if self._has_active_background_task():
             self._append_to_page("emails", ["[E-mails] Ja existe uma operacao em andamento."])
             return
+
+        target_summary = self._build_email_sources_summary(sources, origin_label)
+        policy = build_action_policy(
+            action_id="email_scan_open_and_analyze",
+            title="Autorizar leitura local de e-mails",
+            description=(
+                "O SentinelaPC vai abrir localmente os arquivos de e-mail selecionados em modo somente leitura para verificar remetente, assunto, links e anexos suspeitos. Nenhum conteudo sera enviado para fora do computador."
+            ),
+            severity=ActionSeverity.SENSITIVE,
+            confirm_label="Autorizar analise",
+            detail_lines=(
+                "A leitura acontece apenas nos arquivos e pastas que voce selecionou.",
+                "O aplicativo nao acessa contas online nem altera o conteudo do e-mail.",
+                "A verificacao procura sinais de phishing, links suspeitos e anexos perigosos.",
+            ),
+            success_message="Analise local de e-mails autorizada.",
+        )
+        correlation_id = self._confirm_sensitive_action(policy, target_summary=target_summary)
+        if correlation_id is None:
+            self._append_to_page("emails", ["[E-mails] Permissao negada. Nenhum arquivo de e-mail foi aberto para analise."])
+            return
+
+        self._active_email_scan_policy = policy
+        self._active_email_scan_correlation_id = correlation_id
+        self._active_email_scan_summary = target_summary
+        self._record_action_event(
+            policy,
+            target_summary,
+            "approved",
+            "started",
+            "Analise local de e-mails iniciada apos autorizacao do usuario.",
+            correlation_id,
+        )
 
         self._prepare_operation_page(
             "emails",
@@ -964,18 +1265,35 @@ class MainWindow(QMainWindow):
             )
             return
 
-        confirmation = QMessageBox.question(
-            self,
-            "Resolver problemas da auditoria",
-            (
-                "Deseja aplicar agora as correcoes automaticas seguras para os problemas detectados?\n\n"
-                f"Problemas encontrados: {len(findings_to_fix)}\n"
-                f"Problemas auto-resoluveis: {len(auto_fixable)}"
+        policy = build_action_policy(
+            action_id="audit_resolve_batch",
+            title="Aplicar correcoes automaticas da auditoria",
+            description="O SentinelaPC vai tentar aplicar apenas correcoes consideradas seguras e suportadas para os achados atuais da auditoria.",
+            severity=ActionSeverity.CRITICAL,
+            confirm_label="Aplicar correcoes",
+            requires_admin=any(finding.auto_resolvable for finding in auto_fixable),
+            admin_reason="Algumas correcoes alteram configuracoes do Windows e exigem elevacao administrativa para serem aplicadas de forma segura.",
+            detail_lines=(
+                f"Problemas detectados: {len(findings_to_fix)}",
+                f"Problemas auto-resoluveis: {len(auto_fixable)}",
+                "As correcoes nao removem manualmente itens sem suporte automatico.",
             ),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
         )
-        if confirmation != QMessageBox.StandardButton.Yes:
+        correlation_id = self._confirm_sensitive_action(
+            policy,
+            target_summary=(
+                f"Achados corrigiveis agora: {len(auto_fixable)} | "
+                f"acao manual restante: {len(findings_to_fix) - len(auto_fixable)}"
+            ),
+        )
+        if correlation_id is None:
+            return
+
+        if not self._ensure_admin_permission(
+            policy,
+            target_summary="Correcoes automaticas da auditoria avancada",
+            correlation_id=correlation_id,
+        ):
             return
 
         resolved_count = 0
@@ -1017,27 +1335,23 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Resolucao em lote concluida", message)
         self.statusBar().showMessage("Resolucao em lote concluida. Reexecute a Auditoria Avancada para validar o resultado.")
 
-        if permission_failed_count > 0 and not self._is_running_as_admin():
-            elevate_now = QMessageBox.question(
-                self,
-                "Permissao de administrador necessaria",
-                (
-                    "Algumas correcoes exigem privilegios de administrador e nao puderam ser aplicadas.\n\n"
-                    "Deseja reiniciar o SentinelaPC agora com permissao de administrador?"
-                ),
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes,
-            )
-            if elevate_now == QMessageBox.StandardButton.Yes:
-                if self._relaunch_as_admin():
-                    QApplication.quit()
-                else:
-                    QMessageBox.warning(
-                        self,
-                        "Falha ao elevar privilegios",
-                        "Nao foi possivel solicitar elevacao UAC automaticamente. "
-                        "Abra o aplicativo manualmente como administrador.",
-                    )
+        final_status = "succeeded"
+        if failed_count > 0 and resolved_count == 0:
+            final_status = "failed"
+        elif failed_count > 0 or manual_count > 0:
+            final_status = "partial"
+
+        self._record_action_event(
+            policy,
+            f"auto_fixable={len(auto_fixable)}",
+            "approved",
+            final_status,
+            (
+                f"Resolvidos={resolved_count} | falhas={failed_count} | "
+                f"manuais={manual_count} | admin_falhas={permission_failed_count} | reinicio={restart_required}"
+            ),
+            correlation_id,
+        )
 
     def _handle_audit_failed(self, error_message: str) -> None:
         """Registra falha inesperada da auditoria avancada."""
@@ -1084,6 +1398,150 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             log_warning(self.context.logger, f"Falha ao solicitar elevacao UAC: {exc}")
             return False
+
+    def _confirm_sensitive_action(self, policy: ActionPolicy, *, target_summary: str) -> str | None:
+        """Exibe confirmacao padronizada e registra a decisao do operador."""
+        correlation_id = self._new_action_correlation_id(policy.action_id)
+        dialog = ConfirmActionDialog(policy, target_summary=target_summary, parent=self)
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            self._record_action_event(
+                policy,
+                target_summary,
+                "cancelled",
+                "skipped",
+                "Usuario cancelou a confirmacao antes da execucao.",
+                correlation_id,
+            )
+            return None
+
+        self._record_action_event(
+            policy,
+            target_summary,
+            "approved",
+            "pending",
+            "Confirmacao concedida na interface.",
+            correlation_id,
+        )
+        return correlation_id
+
+    def _ensure_admin_permission(
+        self,
+        policy: ActionPolicy,
+        *,
+        target_summary: str,
+        correlation_id: str,
+    ) -> bool:
+        """Solicita elevacao quando a politica exigir privilegios administrativos."""
+        if not policy.requires_admin or self._is_running_as_admin():
+            return True
+
+        dialog = AdminPermissionDialog(policy, target_summary=target_summary, parent=self)
+        if dialog.exec() != dialog.DialogCode.Accepted or dialog.choice != "relaunch":
+            self._record_action_event(
+                policy,
+                target_summary,
+                "cancelled",
+                "skipped",
+                "Usuario optou por nao reiniciar o aplicativo com privilegios elevados.",
+                correlation_id,
+            )
+            return False
+
+        if self._relaunch_as_admin():
+            self._record_action_event(
+                policy,
+                target_summary,
+                "relaunch",
+                "handoff",
+                "Aplicativo reiniciado para concluir a acao com privilegios elevados.",
+                correlation_id,
+            )
+            QApplication.quit()
+            return False
+
+        self._record_action_event(
+            policy,
+            target_summary,
+            "relaunch",
+            "failed",
+            "Falha ao solicitar elevacao UAC automaticamente.",
+            correlation_id,
+        )
+        QMessageBox.warning(
+            self,
+            "Falha ao elevar privilegios",
+            "Nao foi possivel solicitar elevacao UAC automaticamente. Abra o aplicativo manualmente como administrador.",
+        )
+        return False
+
+    def _record_action_event(
+        self,
+        policy: ActionPolicy,
+        target_summary: str,
+        decision: str,
+        status: str,
+        details: str,
+        correlation_id: str,
+    ) -> None:
+        """Registra no banco e no log tecnico um evento de acao sensivel."""
+        try:
+            self.action_event_repository.save_event(
+                ActionEventRecordInput(
+                    action_id=policy.action_id,
+                    action_title=policy.title,
+                    severity=policy.severity.value,
+                    target_summary=target_summary,
+                    requires_admin=policy.requires_admin,
+                    decision=decision,
+                    status=status,
+                    details=details,
+                    correlation_id=correlation_id,
+                )
+            )
+        except Exception as error:
+            log_error(self.context.logger, "Falha ao registrar evento de acao sensivel.", error)
+            return
+
+        log_info(
+            self.context.logger,
+            (
+                "Evento de acao registrado | "
+                f"action_id={policy.action_id} | severity={policy.severity.value} | decision={decision} | "
+                f"status={status} | correlation_id={correlation_id} | target={target_summary}"
+            ),
+        )
+
+    def _new_action_correlation_id(self, action_id: str) -> str:
+        """Gera um identificador curto para correlacionar confirmacao e resultado."""
+        return f"{action_id}-{uuid4().hex[:10]}"
+
+    def _resolve_connected_email_provider(self) -> EmailProvider | None:
+        """Resolve o provedor atualmente conectado a partir do status persistido."""
+        try:
+            gmail_status = self.email_account_service.get_status(EmailProvider.GMAIL)
+            if gmail_status.connected:
+                return EmailProvider.GMAIL
+
+            outlook_status = self.email_account_service.get_status(EmailProvider.OUTLOOK)
+            if outlook_status.connected:
+                return EmailProvider.OUTLOOK
+        except Exception:
+            return None
+        return None
+
+    def _build_email_sources_summary(self, sources: list[Path], origin_label: str) -> str:
+        """Resume de forma legivel as origens escolhidas para analise local de e-mails."""
+        if not sources:
+            return f"Origem selecionada: {origin_label}"
+
+        if len(sources) == 1:
+            return f"Origem selecionada: {sources[0]}"
+
+        preview = [str(path) for path in sources[:3]]
+        lines = [f"Origem: {origin_label}", *preview]
+        if len(sources) > 3:
+            lines.append(f"... e mais {len(sources) - 3} item(ns).")
+        return "\n".join(lines)
 
     def _start_diagnostics(self) -> None:
         """Executa o diagnostico de saude do PC em background."""
@@ -1445,7 +1903,7 @@ class MainWindow(QMainWindow):
             for result in report.results:
                 summary_lines.append(
                     (
-                        f"  - arquivo={result.source_file} | assunto={result.subject} | remetente={result.sender} | "
+                        f"  - origem={result.source_label or result.source_file} | assunto={result.subject} | remetente={result.sender} | "
                         f"links={result.links_found} | anexos={result.attachments_found} | "
                         f"score={result.score} | classe={result.classification.value} | motivos={'; '.join(result.reasons)}"
                     )
@@ -1457,13 +1915,34 @@ class MainWindow(QMainWindow):
         self.emails_page.update_summary(report.inspected_items, report.suspicious_items, datetime.now().strftime("%H:%M:%S"))
         self._append_dashboard_activity(summary_lines)
         self.last_email_scan_report = report
-        self._register_executed_scan("Analise de e-mails")
+        scan_label = (
+            f"Analise online de e-mails ({report.provider})"
+            if report.source_kind == "online" and report.provider
+            else "Analise de e-mails"
+        )
+        self._register_executed_scan(scan_label)
+        if self._active_email_scan_correlation_id is not None and self._active_email_scan_policy is not None:
+            self._record_action_event(
+                self._active_email_scan_policy,
+                self._active_email_scan_summary or "Analise de e-mails",
+                "approved",
+                "interrupted" if report.interrupted else "succeeded",
+                f"Itens analisados={report.inspected_items} | suspeitos={report.suspicious_items} | erros={len(report.errors)}",
+                self._active_email_scan_correlation_id,
+            )
+            self._active_email_scan_correlation_id = None
+            self._active_email_scan_summary = ""
+            self._active_email_scan_policy = None
         self._save_history_entry(
             HistoryRecordInput(
-                scan_type="Analise de e-mails",
+                scan_type=scan_label,
                 analyzed_count=report.inspected_items,
                 suspicious_count=report.suspicious_items,
-                summary=f"E-mails locais avaliados em modo somente leitura | erros={len(report.errors)}",
+                summary=(
+                    f"E-mails online ({report.provider}) avaliados em modo somente leitura | erros={len(report.errors)}"
+                    if report.source_kind == "online" and report.provider
+                    else f"E-mails locais avaliados em modo somente leitura | erros={len(report.errors)}"
+                ),
             )
         )
 
@@ -1527,6 +2006,18 @@ class MainWindow(QMainWindow):
     def _handle_email_scan_failed(self, error_message: str) -> None:
         """Registra falhas inesperadas da analise de e-mails."""
         self._finish_visual_progress("emails", interrupted=True)
+        if self._active_email_scan_correlation_id is not None and self._active_email_scan_policy is not None:
+            self._record_action_event(
+                self._active_email_scan_policy,
+                self._active_email_scan_summary or "Analise de e-mails",
+                "approved",
+                "failed",
+                error_message,
+                self._active_email_scan_correlation_id,
+            )
+            self._active_email_scan_correlation_id = None
+            self._active_email_scan_summary = ""
+            self._active_email_scan_policy = None
         self._report_background_failure(
             page_id="emails",
             display_prefix="[E-mails] Falha inesperada durante a analise",
@@ -1668,19 +2159,23 @@ class MainWindow(QMainWindow):
             return
 
         selected_result = selected_results[0]
-        confirmation = QMessageBox.question(
-            self,
-            "Confirmar quarentena",
-            (
-                "Confirma mover o arquivo selecionado para a pasta de quarentena?\n\n"
-                f"Arquivo: {selected_result.path}\n"
-                f"Risco: {selected_result.initial_risk_level.value}\n"
-                f"Motivo: {dialog.reason or 'Nao informado'}"
+        policy = build_action_policy(
+            action_id="quarantine_file_single",
+            title="Enviar arquivo para quarentena",
+            description="O arquivo sera movido para uma area isolada e deixara de ficar disponivel no local original.",
+            severity=ActionSeverity.HIGH,
+            confirm_label="Enviar para quarentena",
+            detail_lines=(
+                f"Risco identificado: {selected_result.initial_risk_level.value}",
+                f"Motivo registrado: {dialog.reason or 'Nao informado'}",
             ),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            success_message="Arquivo movido para quarentena com sucesso.",
         )
-        if confirmation != QMessageBox.StandardButton.Yes:
+        correlation_id = self._confirm_sensitive_action(
+            policy,
+            target_summary=f"Arquivo: {selected_result.path}",
+        )
+        if correlation_id is None:
             self._append_to_page("files", ["[Quarentena] Confirmacao negada pelo usuario. Nenhum arquivo foi movido."])
             return
 
@@ -1693,15 +2188,20 @@ class MainWindow(QMainWindow):
                 user_confirmed=True,
             )
         except FileNotFoundError:
+            self._record_action_event(policy, str(selected_result.path), "approved", "failed", "Arquivo nao encontrado no momento da quarentena.", correlation_id)
             QMessageBox.warning(self, "Arquivo indisponivel", "O arquivo selecionado nao foi encontrado. Execute uma nova verificacao antes de tentar novamente.")
             return
         except PermissionError:
+            self._record_action_event(policy, str(selected_result.path), "approved", "failed", "Permissao negada pelo Windows ao mover arquivo para quarentena.", correlation_id)
             QMessageBox.critical(self, "Permissao negada", "O Windows negou a movimentacao do arquivo para a quarentena.")
             return
         except Exception as error:
+            self._record_action_event(policy, str(selected_result.path), "approved", "failed", f"Erro inesperado: {error}", correlation_id)
             log_error(self.context.logger, "Falha inesperada ao mover arquivo para quarentena.", error)
             QMessageBox.critical(self, "Falha na quarentena", f"Nao foi possivel concluir a quarentena: {error}")
             return
+
+        self._record_action_event(policy, str(selected_result.path), "approved", "succeeded", f"Arquivo enviado para {quarantined_item.quarantined_path}", correlation_id)
 
         if self.last_file_scan_report is not None:
             self.last_file_scan_report = FileScanReport(
@@ -1736,18 +2236,22 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Sem itens", "Nao ha arquivos suspeitos para mover para quarentena.")
             return
 
-        confirmation = QMessageBox.question(
-            self,
-            "Confirmar quarentena em lote",
-            (
-                "Confirma mover todos os arquivos suspeitos para a pasta de quarentena?\n\n"
-                f"Total de arquivos: {len(suspicious_files)}\n"
-                f"Motivo aplicado: {reason or 'Nao informado'}"
+        policy = build_action_policy(
+            action_id="quarantine_file_batch",
+            title="Enviar arquivos para quarentena",
+            description="Todos os arquivos selecionados serao movidos para a area isolada do SentinelaPC.",
+            severity=ActionSeverity.CRITICAL,
+            confirm_label="Enviar arquivos",
+            detail_lines=(
+                f"Total de arquivos selecionados: {len(suspicious_files)}",
+                f"Motivo aplicado ao lote: {reason or 'Nao informado'}",
             ),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
         )
-        if confirmation != QMessageBox.StandardButton.Yes:
+        correlation_id = self._confirm_sensitive_action(
+            policy,
+            target_summary=f"Quantidade de arquivos: {len(suspicious_files)}",
+        )
+        if correlation_id is None:
             self._append_to_page("files", ["[Quarentena] Quarentena em lote cancelada pelo usuario."])
             return
 
@@ -1797,6 +2301,15 @@ class MainWindow(QMainWindow):
 
         if moved_items:
             self.session_quarantine_items.extend(moved_items)
+
+        self._record_action_event(
+            policy,
+            f"arquivos={len(suspicious_files)}",
+            "approved",
+            "succeeded" if moved_items else "failed",
+            f"Movidos={len(moved_items)} | falhas={len(failed_messages)}",
+            correlation_id,
+        )
 
         lines = [
             "[Quarentena] Operacao em lote finalizada.",
@@ -1861,20 +2374,22 @@ class MainWindow(QMainWindow):
             return
 
         selected_result = selected_results[0]
-        confirmation = QMessageBox.question(
-            self,
-            "Confirmar quarentena de processo",
-            (
-                "Confirma mover o executavel do processo selecionado para a pasta de quarentena?\n\n"
-                f"Processo: {selected_result.name} (PID {selected_result.pid})\n"
-                f"Executavel: {selected_result.executable_path}\n"
-                f"Risco: {selected_result.initial_risk_level.value}\n"
-                f"Motivo: {dialog.reason or 'Nao informado'}"
+        policy = build_action_policy(
+            action_id="quarantine_process_single",
+            title="Isolar executavel de processo",
+            description="O arquivo executavel associado ao processo selecionado sera movido para a area de quarentena.",
+            severity=ActionSeverity.CRITICAL,
+            confirm_label="Isolar executavel",
+            detail_lines=(
+                f"Processo: {selected_result.name} (PID {selected_result.pid})",
+                f"Risco identificado: {selected_result.initial_risk_level.value}",
             ),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
         )
-        if confirmation != QMessageBox.StandardButton.Yes:
+        correlation_id = self._confirm_sensitive_action(
+            policy,
+            target_summary=f"Executavel: {selected_result.executable_path}",
+        )
+        if correlation_id is None:
             self._append_to_page("processes", ["[Quarentena] Confirmacao negada pelo usuario."])
             return
 
@@ -1886,15 +2401,20 @@ class MainWindow(QMainWindow):
                 user_confirmed=True,
             )
         except FileNotFoundError:
+            self._record_action_event(policy, str(selected_result.executable_path), "approved", "failed", "Executavel nao encontrado.", correlation_id)
             QMessageBox.warning(self, "Arquivo indisponivel", "O executavel selecionado nao foi encontrado.")
             return
         except PermissionError:
+            self._record_action_event(policy, str(selected_result.executable_path), "approved", "failed", "Permissao negada pelo Windows.", correlation_id)
             QMessageBox.critical(self, "Permissao negada", "O Windows negou a movimentacao do arquivo para a quarentena.")
             return
         except Exception as error:
+            self._record_action_event(policy, str(selected_result.executable_path), "approved", "failed", f"Erro inesperado: {error}", correlation_id)
             log_error(self.context.logger, "Falha inesperada ao mover executavel de processo para quarentena.", error)
             QMessageBox.critical(self, "Falha na quarentena", f"Nao foi possivel concluir a quarentena: {error}")
             return
+
+        self._record_action_event(policy, str(selected_result.executable_path), "approved", "succeeded", f"Executavel enviado para {quarantined_item.quarantined_path}", correlation_id)
 
         self.session_quarantine_items.append(quarantined_item)
         self._append_to_page(
@@ -1915,18 +2435,22 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Sem itens", "Nao ha executaveis de processos disponiveis para mover.")
             return
 
-        confirmation = QMessageBox.question(
-            self,
-            "Confirmar quarentena em lote (processos)",
-            (
-                "Confirma mover todos os executaveis de processos suspeitos para a quarentena?\n\n"
-                f"Total de arquivos: {len(candidates)}\n"
-                f"Motivo aplicado: {reason or 'Nao informado'}"
+        policy = build_action_policy(
+            action_id="quarantine_process_batch",
+            title="Isolar executaveis de processos",
+            description="Todos os executaveis selecionados serao movidos para a area de quarentena do aplicativo.",
+            severity=ActionSeverity.CRITICAL,
+            confirm_label="Isolar executaveis",
+            detail_lines=(
+                f"Total de executaveis selecionados: {len(candidates)}",
+                f"Motivo aplicado ao lote: {reason or 'Nao informado'}",
             ),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
         )
-        if confirmation != QMessageBox.StandardButton.Yes:
+        correlation_id = self._confirm_sensitive_action(
+            policy,
+            target_summary=f"Executaveis selecionados: {len(candidates)}",
+        )
+        if correlation_id is None:
             self._append_to_page("processes", ["[Quarentena] Quarentena em lote de processos cancelada pelo usuario."])
             return
 
@@ -1955,6 +2479,15 @@ class MainWindow(QMainWindow):
 
         if moved_items:
             self.session_quarantine_items.extend(moved_items)
+
+        self._record_action_event(
+            policy,
+            f"executaveis={len(candidates)}",
+            "approved",
+            "succeeded" if moved_items else "failed",
+            f"Movidos={len(moved_items)} | falhas={len(failed_messages)}",
+            correlation_id,
+        )
 
         lines = [
             "[Quarentena] Operacao em lote de processos finalizada.",
@@ -2013,21 +2546,23 @@ class MainWindow(QMainWindow):
             return
 
         selected_result = selected_results[0]
-        confirmation = QMessageBox.question(
-            self,
-            "Confirmar quarentena de inicializacao",
-            (
-                "Confirma mover o executavel do item de inicializacao selecionado para a pasta de quarentena?\n\n"
-                f"Item: {selected_result.name}\n"
-                f"Origem: {selected_result.origin}\n"
-                f"Executavel: {selected_result.executable_path}\n"
-                f"Risco: {selected_result.risk_level.value}\n"
-                f"Motivo: {dialog.reason or 'Nao informado'}"
+        policy = build_action_policy(
+            action_id="quarantine_startup_single",
+            title="Isolar item de inicializacao",
+            description="O executavel vinculado ao item de inicializacao sera movido para a quarentena e deixara de estar disponivel no local atual.",
+            severity=ActionSeverity.CRITICAL,
+            confirm_label="Isolar item",
+            detail_lines=(
+                f"Item: {selected_result.name}",
+                f"Origem: {selected_result.origin}",
+                f"Risco identificado: {selected_result.risk_level.value}",
             ),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
         )
-        if confirmation != QMessageBox.StandardButton.Yes:
+        correlation_id = self._confirm_sensitive_action(
+            policy,
+            target_summary=f"Executavel: {selected_result.executable_path}",
+        )
+        if correlation_id is None:
             self._append_to_page("startup", ["[Quarentena] Confirmacao negada pelo usuario."])
             return
 
@@ -2039,15 +2574,20 @@ class MainWindow(QMainWindow):
                 user_confirmed=True,
             )
         except FileNotFoundError:
+            self._record_action_event(policy, str(selected_result.executable_path), "approved", "failed", "Executavel nao encontrado.", correlation_id)
             QMessageBox.warning(self, "Arquivo indisponivel", "O executavel selecionado nao foi encontrado.")
             return
         except PermissionError:
+            self._record_action_event(policy, str(selected_result.executable_path), "approved", "failed", "Permissao negada pelo Windows.", correlation_id)
             QMessageBox.critical(self, "Permissao negada", "O Windows negou a movimentacao do arquivo para a quarentena.")
             return
         except Exception as error:
+            self._record_action_event(policy, str(selected_result.executable_path), "approved", "failed", f"Erro inesperado: {error}", correlation_id)
             log_error(self.context.logger, "Falha inesperada ao mover executavel de startup para quarentena.", error)
             QMessageBox.critical(self, "Falha na quarentena", f"Nao foi possivel concluir a quarentena: {error}")
             return
+
+        self._record_action_event(policy, str(selected_result.executable_path), "approved", "succeeded", f"Executavel enviado para {quarantined_item.quarantined_path}", correlation_id)
 
         self.session_quarantine_items.append(quarantined_item)
         self._append_to_page(
@@ -2068,18 +2608,22 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Sem itens", "Nao ha executaveis de inicializacao disponiveis para mover.")
             return
 
-        confirmation = QMessageBox.question(
-            self,
-            "Confirmar quarentena em lote (inicializacao)",
-            (
-                "Confirma mover todos os executaveis de inicializacao suspeitos para a quarentena?\n\n"
-                f"Total de arquivos: {len(candidates)}\n"
-                f"Motivo aplicado: {reason or 'Nao informado'}"
+        policy = build_action_policy(
+            action_id="quarantine_startup_batch",
+            title="Isolar itens de inicializacao",
+            description="Todos os executaveis selecionados serao movidos para a area isolada do SentinelaPC.",
+            severity=ActionSeverity.CRITICAL,
+            confirm_label="Isolar itens",
+            detail_lines=(
+                f"Total de executaveis selecionados: {len(candidates)}",
+                f"Motivo aplicado ao lote: {reason or 'Nao informado'}",
             ),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
         )
-        if confirmation != QMessageBox.StandardButton.Yes:
+        correlation_id = self._confirm_sensitive_action(
+            policy,
+            target_summary=f"Executaveis selecionados: {len(candidates)}",
+        )
+        if correlation_id is None:
             self._append_to_page("startup", ["[Quarentena] Quarentena em lote de inicializacao cancelada pelo usuario."])
             return
 
@@ -2108,6 +2652,15 @@ class MainWindow(QMainWindow):
 
         if moved_items:
             self.session_quarantine_items.extend(moved_items)
+
+        self._record_action_event(
+            policy,
+            f"executaveis={len(candidates)}",
+            "approved",
+            "succeeded" if moved_items else "failed",
+            f"Movidos={len(moved_items)} | falhas={len(failed_messages)}",
+            correlation_id,
+        )
 
         lines = [
             "[Quarentena] Operacao em lote de inicializacao finalizada.",
@@ -2155,30 +2708,38 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Item ja restaurado", "O item selecionado ja foi restaurado anteriormente.")
             return
 
-        confirmation = QMessageBox.question(
-            self,
-            "Confirmar restauracao",
-            (
-                "Confirma restaurar o item selecionado?\n\n"
-                f"Arquivo: {selected_item.original_name}\n"
-                f"Destino original: {selected_item.original_path}"
+        policy = build_action_policy(
+            action_id="quarantine_restore",
+            title="Restaurar item da quarentena",
+            description="O arquivo voltara a ficar acessivel no sistema no destino original ou em caminho alternativo seguro.",
+            severity=ActionSeverity.HIGH,
+            confirm_label="Restaurar item",
+            detail_lines=(
+                f"Arquivo: {selected_item.original_name}",
+                f"Destino original: {selected_item.original_path}",
             ),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
         )
-        if confirmation != QMessageBox.StandardButton.Yes:
+        correlation_id = self._confirm_sensitive_action(
+            policy,
+            target_summary=f"Item em quarentena: {selected_item.quarantined_path}",
+        )
+        if correlation_id is None:
             self._append_dashboard_activity(["[Quarentena] Restauracao cancelada pelo usuario."])
             return
 
         try:
             restored_item = self.quarantine_service.restore_item(selected_item.id, user_confirmed=True)
         except PermissionError:
+            self._record_action_event(policy, selected_item.original_name, "approved", "failed", "Permissao negada pelo Windows ao restaurar item.", correlation_id)
             QMessageBox.critical(self, "Permissao negada", "O Windows negou a restauracao do arquivo selecionado.")
             return
         except Exception as error:
+            self._record_action_event(policy, selected_item.original_name, "approved", "failed", f"Erro inesperado: {error}", correlation_id)
             log_error(self.context.logger, "Falha ao restaurar item da quarentena.", error)
             QMessageBox.critical(self, "Falha na restauracao", f"Nao foi possivel restaurar o item: {error}")
             return
+
+        self._record_action_event(policy, selected_item.original_name, "approved", "succeeded", f"Item restaurado para {restored_item.original_path}", correlation_id)
 
         self.session_quarantine_items = [restored_item if item.id == restored_item.id else item for item in self.session_quarantine_items]
         self._refresh_quarantine_page()
@@ -2215,31 +2776,40 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Exclusao indisponivel", "Somente itens ainda ativos na quarentena podem ser excluidos definitivamente.")
             return
 
-        confirmation = QMessageBox.question(
-            self,
-            "Confirmar envio para a Lixeira",
-            (
-                "Confirma enviar para a Lixeira o arquivo selecionado da quarentena?\n\n"
-                "Essa acao remove o arquivo da lista ativa de quarentena.\n\n"
-                f"Arquivo: {selected_item.original_name}\n"
-                f"Local isolado: {selected_item.quarantined_path}"
+        policy = build_action_policy(
+            action_id="quarantine_delete",
+            title="Excluir item ativo da quarentena",
+            description="O arquivo sera enviado para a Lixeira e deixara a lista ativa de quarentena. O registro de auditoria sera mantido.",
+            severity=ActionSeverity.CRITICAL,
+            confirm_label="Enviar para a Lixeira",
+            irreversible=True,
+            confirm_phrase="EXCLUIR",
+            detail_lines=(
+                f"Arquivo: {selected_item.original_name}",
+                f"Local isolado: {selected_item.quarantined_path}",
             ),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
         )
-        if confirmation != QMessageBox.StandardButton.Yes:
+        correlation_id = self._confirm_sensitive_action(
+            policy,
+            target_summary=f"Item ativo: {selected_item.original_name}",
+        )
+        if correlation_id is None:
             self._append_dashboard_activity(["[Quarentena] Envio para a Lixeira cancelado pelo usuario."])
             return
 
         try:
             deleted_item = self.quarantine_service.delete_item(selected_item.id, user_confirmed=True)
         except PermissionError:
+            self._record_action_event(policy, selected_item.original_name, "approved", "failed", "Permissao negada pelo Windows ao enviar item para a Lixeira.", correlation_id)
             QMessageBox.critical(self, "Permissao negada", "O Windows negou o envio do arquivo para a Lixeira.")
             return
         except Exception as error:
+            self._record_action_event(policy, selected_item.original_name, "approved", "failed", f"Erro inesperado: {error}", correlation_id)
             log_error(self.context.logger, "Falha ao excluir item da quarentena.", error)
             QMessageBox.critical(self, "Falha na exclusao", f"Nao foi possivel enviar o item para a Lixeira: {error}")
             return
+
+        self._record_action_event(policy, selected_item.original_name, "approved", "succeeded", "Item enviado para a Lixeira e mantido apenas no historico.", correlation_id)
 
         self.session_quarantine_items = [deleted_item if item.id == deleted_item.id else item for item in self.session_quarantine_items]
         self._refresh_quarantine_page()
@@ -2311,6 +2881,11 @@ class MainWindow(QMainWindow):
         self.startup_page.set_action_enabled("startup_scan", enabled)
         self.startup_page.set_action_enabled("quarantine_startup", enabled)
         self.browsers_page.set_action_enabled("browser_scan", enabled)
+        self.browsers_page.set_action_enabled("browser_view_suspicious", enabled)
+        self.emails_page.set_action_enabled("email_connect_gmail", enabled)
+        self.emails_page.set_action_enabled("email_connect_outlook", enabled)
+        self.emails_page.set_action_enabled("email_scan_online", enabled)
+        self.emails_page.set_action_enabled("email_disconnect_account", enabled)
         self.emails_page.set_action_enabled("email_scan_file", enabled)
         self.emails_page.set_action_enabled("email_scan_folder", enabled)
         self.audit_page.set_action_enabled("audit_run", enabled)

@@ -106,8 +106,14 @@ _ACTION_ICONS: dict[str, str] = {
     "open_quarantine":   "🗂",
     "generate_report":   "📄",
     "browser_scan":      "🌐",
+    "browser_view_suspicious": "!",
     "email_scan_file":   "✉",
     "email_scan_folder": "📁",
+    "email_oauth_help": "?",
+    "email_connect_gmail": "G",
+    "email_connect_outlook": "O",
+    "email_scan_online": "@",
+    "email_disconnect_account": "×",
 }
 
 

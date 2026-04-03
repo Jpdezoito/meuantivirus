@@ -71,6 +71,8 @@ class EmailSecurityService:
             inspected_items=inspected_items,
             suspicious_items=suspicious_items,
             interrupted=scan_control.is_cancelled() if scan_control is not None else False,
+            source_kind="local",
+            provider=None,
             results=results,
             errors=errors,
         )
@@ -129,6 +131,7 @@ class EmailSecurityService:
         return (
             EmailScanItem(
                 source_file=file_path,
+                source_label=str(file_path),
                 subject=subject or "(sem assunto)",
                 sender=sender or "(remetente nao identificado)",
                 links_found=len(links),
@@ -136,6 +139,8 @@ class EmailSecurityService:
                 score=evaluation.score,
                 risk_level=evaluation.risk_level,
                 classification=evaluation.classification,
+                source_kind="local",
+                provider=None,
                 reasons=list(evaluation.reasons),
             ),
             None,

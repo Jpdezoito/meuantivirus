@@ -12,6 +12,8 @@ from app.services.browser_security_service import BrowserSecurityService
 from app.services.browser_scan_models import BrowserScanReport
 from app.services.audit_service import AuditService
 from app.services.audit_models import AuditReport
+from app.services.email_account_models import EmailProvider
+from app.services.email_account_service import EmailAccountService
 from app.services.email_security_service import EmailSecurityService
 from app.services.email_scan_models import EmailScanReport
 from app.services.file_scan_models import FileScanReport
@@ -249,6 +251,38 @@ class EmailScanWorker(BackgroundWorkerBase):
             "A analise de e-mails",
             lambda: self.email_service.analyze_email_sources(
                 self.sources,
+                progress_callback=self.progress.emit,
+                scan_control=self.scan_control,
+            ),
+        )
+
+
+class EmailOnlineScanWorker(BackgroundWorkerBase):
+    """Executa a analise online da caixa de e-mail em thread separada."""
+
+    def __init__(self, account_service: EmailAccountService, provider: EmailProvider) -> None:
+        super().__init__()
+        self.account_service = account_service
+        self.provider = provider
+        self.scan_control = ScanControl()
+
+    def toggle_pause(self) -> bool:
+        if self.scan_control.is_paused():
+            self.scan_control.request_resume()
+            return False
+
+        self.scan_control.request_pause()
+        return True
+
+    def request_cancel(self) -> None:
+        self.scan_control.request_cancel()
+
+    @Slot()
+    def run(self) -> None:
+        self._run_safely(
+            "A analise online de e-mails",
+            lambda: self.account_service.analyze_connected_inbox(
+                self.provider,
                 progress_callback=self.progress.emit,
                 scan_control=self.scan_control,
             ),

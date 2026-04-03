@@ -13,6 +13,7 @@ class EmailScanItem:
     """Representa um item de e-mail analisado com score de risco."""
 
     source_file: Path
+    source_label: str
     subject: str
     sender: str
     links_found: int
@@ -20,6 +21,8 @@ class EmailScanItem:
     score: int
     risk_level: RiskLevel
     classification: ThreatClassification
+    source_kind: str = "local"
+    provider: str | None = None
     reasons: list[str] = field(default_factory=list)
 
 
@@ -38,5 +41,7 @@ class EmailScanReport:
     inspected_items: int
     suspicious_items: int
     interrupted: bool = False
+    source_kind: str = "local"
+    provider: str | None = None
     results: list[EmailScanItem] = field(default_factory=list)
     errors: list[EmailScanError] = field(default_factory=list)
