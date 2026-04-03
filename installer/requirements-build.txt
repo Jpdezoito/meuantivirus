@@ -1,0 +1,3 @@
+# Dependencias para empacotamento no Windows.
+-r ../requirements.txt
+PyInstaller>=6.11,<7.0

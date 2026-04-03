@@ -1,0 +1,17 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/pyright/main/packages/vscode-pyright/schemas/pyrightconfig.schema.json",
+  "include": [
+    "."
+  ],
+  "pythonPlatform": "Windows",
+  "pythonVersion": "3.12",
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "extraPaths": [
+        "C:/Users/José Paulo Siqueira/AppData/Local/Programs/Python/Python312/Lib/site-packages",
+        "C:/Users/José Paulo Siqueira/AppData/Local/Programs/Python/Python314/Lib/site-packages"
+      ]
+    }
+  ]
+}

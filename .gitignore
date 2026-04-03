@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+
+# Local runtime artifacts
+logs/
+reports/
+quarantine/
+app/data/sentinela.db
+
+# Build outputs
+build/
+dist/
+*.spec
+
+# OS
+.DS_Store
+Thumbs.db
