@@ -226,7 +226,7 @@ async def main(page: ft.Page) -> None:
     val_suspeitos   = ft.Text("0", size=26, weight=ft.FontWeight.BOLD, color=DANGER)
 
     dir_txt         = ft.Text("Nenhuma pasta selecionada", size=12, color=TEXT2, expand=True, overflow=ft.TextOverflow.ELLIPSIS)
-    results_list    = ft.ListView(spacing=8, expand=True, padding=ft.padding.symmetric(horizontal=16))
+    results_list    = ft.ListView(controls=[], spacing=8, expand=True, padding=ft.padding.symmetric(horizontal=16))
 
     scan_btn        = ft.ElevatedButton(
         content="Iniciar verificacao",
@@ -278,13 +278,13 @@ async def main(page: ft.Page) -> None:
             hash_lbl,
         ]
         col_controls: list[ft.Control] = [
-            ft.Row(row_top, spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            ft.Row(controls=row_top, spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Text(str(result.path), size=10, color=TEXT2, overflow=ft.TextOverflow.ELLIPSIS),
             ft.Text(f"Score: {result.score}", size=11, color=TEXT2),
             ft.Text(reasons_text, size=11, color=TEXT2),
-            ft.Row(row_hash, spacing=6, wrap=True),
+            ft.Row(controls=row_hash, spacing=6, wrap=True),
         ]
-        return _card(ft.Column(col_controls, spacing=5, tight=True), padding=14)
+        return _card(ft.Column(controls=col_controls, spacing=5, tight=True), padding=14)
 
     # ── Logica do scan ────────────────────────────────────────────────────
 
@@ -374,10 +374,10 @@ async def main(page: ft.Page) -> None:
 
     header = ft.Container(
         content=ft.Row(
-            [
+            controls=[
                 ft.Icon(ft.Icons.SECURITY_ROUNDED, color=ACCENT, size=28),
                 ft.Column(
-                    [
+                    controls=[
                         ft.Text("SentinelaPC", size=17, weight=ft.FontWeight.BOLD, color=TEXT1),
                         ft.Text("Protecao mobile", size=11, color=TEXT2),
                     ],
@@ -393,10 +393,10 @@ async def main(page: ft.Page) -> None:
 
     folder_card = _card(
         ft.Column(
-            [
+            controls=[
                 _label("PASTA PARA VERIFICAR"),
                 ft.Row(
-                    [
+                    controls=[
                         dir_txt,
                         ft.IconButton(
                             ft.Icons.FOLDER_OPEN_ROUNDED,
@@ -413,13 +413,13 @@ async def main(page: ft.Page) -> None:
     )
 
     metrics_row = ft.Row(
-        [
+        controls=[
             ft.Container(
-                _card(ft.Column([val_analisados, _label("ANALISADOS")], spacing=4, tight=True)),
+                _card(ft.Column(controls=[val_analisados, _label("ANALISADOS")], spacing=4, tight=True)),
                 expand=True,
             ),
             ft.Container(
-                _card(ft.Column([val_suspeitos, _label("SUSPEITOS")], spacing=4, tight=True)),
+                _card(ft.Column(controls=[val_suspeitos, _label("SUSPEITOS")], spacing=4, tight=True)),
                 expand=True,
             ),
         ],
@@ -428,13 +428,13 @@ async def main(page: ft.Page) -> None:
 
     progress_card = _card(
         ft.Column(
-            [
+            controls=[
                 ft.Row(
-                    [progress_ring, status_txt],
+                    controls=[progress_ring, status_txt],
                     spacing=10,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
-                ft.Row([progress_bar], expand=False),
+                ft.Row(controls=[progress_bar], expand=False),
                 progress_lbl,
             ],
             spacing=6, tight=True,
@@ -442,15 +442,15 @@ async def main(page: ft.Page) -> None:
     )
 
     buttons_col = ft.Column(
-        [
-            ft.Row([scan_btn, full_scan_btn], spacing=8),
-            ft.Row([stop_btn], alignment=ft.MainAxisAlignment.CENTER),
+        controls=[
+            ft.Row(controls=[scan_btn, full_scan_btn], spacing=8),
+            ft.Row(controls=[stop_btn], alignment=ft.MainAxisAlignment.CENTER),
         ],
         spacing=8, tight=True,
     )
 
     body = ft.Column(
-        [
+        controls=[
             ft.Container(height=12),
             ft.Container(folder_card,    padding=ft.padding.symmetric(horizontal=16)),
             ft.Container(height=10),
@@ -478,7 +478,7 @@ async def main(page: ft.Page) -> None:
 
     page.add(
         ft.Column(
-            [header, body],
+            controls=[header, body],
             spacing=0,
             expand=True,
         )
