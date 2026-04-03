@@ -240,6 +240,12 @@ async def main(page: ft.Page) -> None:
         bgcolor=DANGER, color=TEXT1,
         height=52, visible=False,
     )
+    full_scan_btn   = ft.ElevatedButton(
+        content="Verificacao completa",
+        icon=ft.Icons.RADAR_ROUNDED,
+        bgcolor="#1d3461", color=TEXT1,
+        height=52, expand=True,
+    )
 
     # ── Construtor de item de resultado ───────────────────────────────────
 
@@ -303,21 +309,16 @@ async def main(page: ft.Page) -> None:
         progress_ring.visible = False
         progress_bar.value    = 1
         suffix = "interrompida" if _cancel[0] else "concluida"
-        status_txt.value    = f"Verificacao {suffix} — {len(results)} suspeito(s)."
-        scan_btn.visible    = True
-        stop_btn.visible    = False
-        _is_scanning[0]     = False
+        status_txt.value      = f"Verificacao {suffix} — {len(results)} suspeito(s)."
+        scan_btn.visible      = True
+        full_scan_btn.visible = True
+        stop_btn.visible      = False
+        _is_scanning[0]       = False
         page.update()
 
-    def _start_scan() -> None:
-        if _is_scanning[0]:
-            return
-        if _sel_dir[0] is None:
-            status_txt.value = "Selecione uma pasta antes de iniciar."
-            page.update()
-            return
-        _is_scanning[0] = True
-        _cancel[0]      = False
+    def _do_start_scan() -> None:
+        _is_scanning[0]       = True
+        _cancel[0]            = False
         results_list.controls.clear()
         val_analisados.value  = "0"
         val_suspeitos.value   = "0"
@@ -327,22 +328,40 @@ async def main(page: ft.Page) -> None:
         progress_lbl.value    = ""
         status_txt.value      = "Verificando..."
         scan_btn.visible      = False
+        full_scan_btn.visible = False
         stop_btn.visible      = True
         page.update()
         threading.Thread(target=_run_scan, daemon=True).start()
+
+    def _start_scan() -> None:
+        if _is_scanning[0]:
+            return
+        if _sel_dir[0] is None:
+            status_txt.value = "Selecione uma pasta antes de iniciar."
+            page.update()
+            return
+        _do_start_scan()
+
+    def _start_full_scan() -> None:
+        if _is_scanning[0]:
+            return
+        _sel_dir[0]   = Path.home()
+        dir_txt.value = "Verificacao completa"
+        _do_start_scan()
 
     def _stop_scan() -> None:
         _cancel[0] = True
         status_txt.value = "Parando verificacao..."
         page.update()
 
-    scan_btn.on_click = _start_scan
-    stop_btn.on_click = _stop_scan
+    scan_btn.on_click      = _start_scan
+    full_scan_btn.on_click = _start_full_scan
+    stop_btn.on_click      = _stop_scan
 
     # ── Seletor de pasta ──────────────────────────────────────────────────
 
     file_picker = FilePicker()
-    page.overlay.append(file_picker)
+    page.services.append(file_picker)
 
     async def _pick_directory() -> None:
         path = await file_picker.get_directory_path(dialog_title="Selecione a pasta para verificar")
@@ -422,7 +441,13 @@ async def main(page: ft.Page) -> None:
         )
     )
 
-    buttons_row = ft.Row([scan_btn, stop_btn], spacing=10)
+    buttons_col = ft.Column(
+        [
+            ft.Row([scan_btn, full_scan_btn], spacing=8),
+            ft.Row([stop_btn], alignment=ft.MainAxisAlignment.CENTER),
+        ],
+        spacing=8, tight=True,
+    )
 
     body = ft.Column(
         [
@@ -432,7 +457,7 @@ async def main(page: ft.Page) -> None:
             ft.Container(metrics_row,    padding=ft.padding.symmetric(horizontal=16)),
             ft.Container(height=10),
             ft.Container(
-                _card(buttons_row),
+                _card(buttons_col),
                 padding=ft.padding.symmetric(horizontal=16),
             ),
             ft.Container(height=10),
