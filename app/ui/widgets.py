@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QSize, Signal
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -11,6 +11,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from app.ui.icons import get_icon, ICON_MAP
 
 
 class CardFrame(QFrame):
@@ -91,34 +93,8 @@ class MetricCard(CardFrame):
         self.value_label.setText(value)
 
 
-# Mapa de icones unicode por action_key
-_ACTION_ICONS: dict[str, str] = {
-    "quick_scan":        "⚡",
-    "full_scan":         "🔍",
-    "pause_scan":        "⏸",
-    "stop_scan":         "⏹",
-    "process_scan":      "⚙",
-    "startup_scan":      "🚀",
-    "open_audit":        "🛡",
-    "open_history":      "📋",
-    "quarantine_file":   "🔒",
-    "diagnostics":       "💊",
-    "open_quarantine":   "🗂",
-    "generate_report":   "📄",
-    "browser_scan":      "🌐",
-    "browser_view_suspicious": "!",
-    "email_scan_file":   "✉",
-    "email_scan_folder": "📁",
-    "email_oauth_help": "?",
-    "email_connect_gmail": "G",
-    "email_connect_outlook": "O",
-    "email_scan_online": "@",
-    "email_disconnect_account": "×",
-}
-
-
 class ActionButton(QPushButton):
-    """Botao padronizado para as principais operacoes do painel."""
+    """Botao padronizado para as principais operacoes do painel — com ícones Font Awesome."""
 
     triggered = Signal(str)
 
@@ -136,17 +112,33 @@ class ActionButton(QPushButton):
         self.tile_mode = tile
 
         if tile:
-            icon = _ACTION_ICONS.get(action_key, "▶")
-            self.setText(f"{icon}\n{label}")
+            # ActionTile com ícone grande (48px)
+            self.setText(label)
             self.setObjectName("actionTile")
-            self.setMinimumSize(110, 90)
-            self.setMaximumSize(200, 110)
+            self.setMinimumSize(140, 120)    # Era 110x90
+            self.setMaximumSize(180, 140)
+            
+            # Adicionar ícone Font Awesome 48px
+            icon_name = ICON_MAP.get(action_key, "dashboard")
+            btn_icon = get_icon(icon_name, size=48, color="#3b9eff")
+            if btn_icon:
+                self.setIcon(btn_icon)
+                self.setIconSize(QSize(48, 48))
         else:
+            # Botão inline com ícone pequeno (20px)
             self.setText(label)
             self.setObjectName(
                 "secondaryActionButton" if style_variant == "secondary" else "primaryActionButton"
             )
-            self.setMinimumHeight(46)
+            self.setMinimumHeight(52)    # Era 46
+            
+            # Adicionar ícone Font Awesome 20px
+            icon_name = ICON_MAP.get(action_key, "dashboard")
+            color = "white" if style_variant == "primary" else "#8ba3bb"
+            btn_icon = get_icon(icon_name, size=20, color=color)
+            if btn_icon:
+                self.setIcon(btn_icon)
+                self.setIconSize(QSize(20, 20))
 
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.clicked.connect(self._emit_triggered)

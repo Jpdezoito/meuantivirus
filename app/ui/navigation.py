@@ -2,24 +2,10 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QSize, Signal
 from PySide6.QtWidgets import QButtonGroup, QLabel, QPushButton, QVBoxLayout, QWidget
 
-
-# Icones unicode por pagina
-_NAV_ICONS: dict[str, str] = {
-    "dashboard":   "◉",
-    "files":       "🔍",
-    "processes":   "⚙",
-    "startup":     "🚀",
-    "browsers":    "🌐",
-    "emails":      "✉",
-    "audit":       "🛡",
-    "quarantine":  "🔒",
-    "reports":     "📄",
-    "history":     "📋",
-    "diagnostics": "💊",
-}
+from app.ui.icons import get_icon, ICON_MAP
 
 _NAV_ITEMS: list[tuple[str, str, str]] = [
     # (page_id, section_label_before | "", text)
@@ -45,15 +31,15 @@ class SidebarNavigation(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("navSidebar")
-        self.setMinimumWidth(190)
-        self.setMaximumWidth(220)
+        self.setMinimumWidth(250)      # Era 190
+        self.setMaximumWidth(280)      # Era 220
         self._buttons: dict[str, QPushButton] = {}
         self._button_group = QButtonGroup(self)
         self._button_group.setExclusive(True)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 28, 14, 20)
-        layout.setSpacing(2)
+        layout.setSpacing(4)              # Era 2
 
         # Logo + nome
         brand_row = QWidget()
@@ -64,7 +50,7 @@ class SidebarNavigation(QWidget):
 
         logo = QLabel("🛡 SentinelaPC")
         logo.setObjectName("navBrand")
-        subtitle = QLabel("Central de seguranca")
+        subtitle = QLabel("Central de segurança")
         subtitle.setObjectName("navSubtitle")
 
         brand_layout.addWidget(logo)
@@ -82,11 +68,19 @@ class SidebarNavigation(QWidget):
                 layout.addWidget(section_lbl)
                 prev_section = section
 
-            icon = _NAV_ICONS.get(page_id, "•")
-            button = QPushButton(f"  {icon}  {label}")
+            # NOVO: Usar Font Awesome icons
+            button = QPushButton(label)
             button.setCheckable(True)
             button.setObjectName("navButton")
             button.setCursor(Qt.CursorShape.PointingHandCursor)
+            
+            # Adicionar ícone (32px)
+            icon_name = ICON_MAP.get(page_id, "dashboard")
+            btn_icon = get_icon(icon_name, size=32, color="#3b9eff")
+            if btn_icon:
+                button.setIcon(btn_icon)
+                button.setIconSize(QSize(32, 32))
+            
             button.clicked.connect(
                 lambda checked=False, target=page_id: self.page_selected.emit(target)
             )

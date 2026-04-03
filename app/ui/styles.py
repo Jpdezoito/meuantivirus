@@ -76,108 +76,128 @@ def build_stylesheet() -> str:
         color: #8ba3bb;
     }
 
-    /* ── Sidebar ─────────────────────────────────────────── */
+    /* ── Sidebar ────────────────────────────────────────────── */
     QWidget#navSidebar {
         background-color: #0d1b2a;
-        border-right: 1px solid #1a2c3e;
+        border-right: 2px solid #1e3f5c;
     }
 
     QLabel#navBrand {
         color: #f0f6ff;
-        font-size: 18px;
-        font-weight: 700;
+        font-size: 20px;
+        font-weight: 800;
         letter-spacing: -0.5px;
     }
 
     QLabel#navSubtitle {
         color: #5d7a93;
         font-size: 10px;
+        font-weight: 500;
     }
 
     QLabel#navFooter {
         color: #374f63;
         font-size: 10px;
+        font-weight: 500;
     }
 
     QLabel#navSectionLabel {
         color: #3b6480;
-        font-size: 9px;
-        font-weight: 700;
-        letter-spacing: 1.2px;
+        font-size: 10px;
+        font-weight: 800;
+        letter-spacing: 1.5px;
     }
 
     QPushButton#navButton {
         background-color: transparent;
         color: #8ba3bb;
         border: none;
-        border-radius: 10px;
-        padding: 10px 14px;
+        border-radius: 12px;
+        padding: 14px 16px;
+        min-height: 44px;
+        margin: 0px 8px;
         text-align: left;
-        font-size: 12px;
-        font-weight: 500;
+        font-size: 13px;
+        font-weight: 600;
+        icon-size: 32px;
     }
 
     QPushButton#navButton:hover {
-        background-color: #1a2c3e;
+        background-color: #1a3f5e;
         color: #cde2f5;
+        border-left: 3px solid transparent;
+        padding-left: 13px;
     }
 
     QPushButton#navButton:checked {
-        background-color: #1a3550;
+        background-color: #1a4570;
         color: #3b9eff;
         font-weight: 700;
-        border-left: 3px solid #3b9eff;
-        padding-left: 11px;
+        border-left: 4px solid #3b9eff;
+        padding-left: 12px;
+        box-shadow: inset -2px 0 8px rgba(59, 158, 255, 0.2);
     }
 
-    /* ── Cards ───────────────────────────────────────────── */
+    /* ── Cards ──────────────────────────────────────────────── */
     QFrame#cardFrame {
         background-color: #1e2d3d;
         border: 1px solid #2a3f55;
         border-radius: 16px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
     }
 
     QFrame#cardFrameElevated {
         background-color: #253447;
         border: 1px solid #334d66;
         border-radius: 16px;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
     }
 
     QFrame#heroCard {
-        background-color: #192f46;
-        border: 1px solid #2e4a66;
+        background: qlineargradient(
+            x1:0, y1:0, x2:1, y2:1,
+            stop:0 #1d3d56,
+            stop:0.5 #192f46,
+            stop:1 #1d3f56
+        );
+        border: 2px solid #2e4a66;
         border-radius: 20px;
+        box-shadow: 0 8px 20px rgba(59, 158, 255, 0.2);
     }
 
-    /* ── Tipografia de pagina ────────────────────────────── */
+    /* ── Tipografia de pagina ──────────────────────────────── */
     QLabel#pageEyebrow {
         color: #3b9eff;
-        font-size: 10px;
-        font-weight: 700;
-        letter-spacing: 1.5px;
+        font-size: 11px;
+        font-weight: 800;
+        letter-spacing: 2px;
     }
 
     QLabel#pageTitleLarge {
         color: #f0f6ff;
-        font-size: 26px;
-        font-weight: 700;
+        font-size: 32px;
+        font-weight: 800;
         letter-spacing: -0.5px;
     }
 
     QLabel#pageSubtitle {
         color: #6e8ea6;
-        font-size: 12px;
+        font-size: 13px;
+        font-weight: 500;
     }
 
     QLabel#sectionTitle {
-        font-size: 14px;
+        font-size: 15px;
         font-weight: 700;
         color: #cde2f5;
+        letter-spacing: 0.2px;
     }
 
     QLabel#sectionDescription {
         font-size: 11px;
         color: #5d7a93;
+        font-weight: 500;
+        line-height: 1.4;
     }
 
     /* ── Hero status (Dashboard) ─────────────────────────── */
@@ -204,23 +224,25 @@ def build_stylesheet() -> str:
         color: #ef4444;
     }
 
-    /* ── Metrics ─────────────────────────────────────────── */
+    /* ── Metrics ────────────────────────────────────────────── */
     QLabel#metricLabel {
-        font-size: 10px;
+        font-size: 11px;
         font-weight: 600;
         color: #5d7a93;
-        letter-spacing: 0.8px;
+        letter-spacing: 1px;
     }
 
     QLabel#metricValue {
-        font-size: 24px;
-        font-weight: 700;
+        font-size: 32px;
+        font-weight: 800;
         color: #3b9eff;
+        letter-spacing: 0.5px;
     }
 
     QLabel#metricCaption {
         font-size: 10px;
         color: #4d6a83;
+        line-height: 1.4;
     }
 
     QLabel#progressPercentLabel {
@@ -248,27 +270,31 @@ def build_stylesheet() -> str:
         );
     }
 
-    /* ── Action tile buttons (dashboard grid) ────────────── */
+    /* ── Action tile buttons (dashboard grid) ───────────────── */
     QPushButton#actionTile {
-        background-color: #1e2d3d;
+        background-color: #1a2f40;
         color: #c8dff0;
-        border: 1px solid #2a3f55;
-        border-radius: 14px;
+        border: 1px solid #2d4564;
+        border-radius: 16px;
         padding: 18px 14px;
         font-size: 12px;
         font-weight: 600;
         text-align: center;
+        icon-size: 48px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
     }
 
     QPushButton#actionTile:hover {
-        background-color: #243344;
-        border-color: #3b6a91;
+        background-color: #1d3f56;
+        border-color: #3b9eff;
         color: #f0f6ff;
+        box-shadow: 0 4px 12px rgba(59, 158, 255, 0.25);
     }
 
     QPushButton#actionTile:pressed {
-        background-color: #1a2c3e;
+        background-color: #16293c;
         border-color: #3b9eff;
+        box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.6);
     }
 
     QPushButton#actionTile:disabled {
@@ -277,26 +303,35 @@ def build_stylesheet() -> str:
         border-color: #1e2f3e;
     }
 
-    /* ── Botoes de operacao (inline pages) ───────────────── */
+    /* ── Botoes de operacao (inline pages) ──────────────────── */
     QPushButton#primaryActionButton {
         background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                         stop:0 #2e8ee8, stop:1 #1a6dbf);
         color: #ffffff;
         border: none;
-        border-radius: 10px;
-        padding: 11px 20px;
-        font-size: 12px;
+        border-radius: 12px;
+        padding: 14px 22px;
+        min-height: 52px;
+        font-size: 13px;
         font-weight: 700;
-        text-align: left;
+        text-align: center;
+        icon-size: 20px;
     }
 
     QPushButton#primaryActionButton:hover {
         background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                         stop:0 #3b9eff, stop:1 #2176ca);
+        box-shadow: 0 6px 16px rgba(59, 158, 255, 0.3);
     }
 
     QPushButton#primaryActionButton:pressed {
         background: #1765b5;
+        box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.6);
+    }
+
+    QPushButton#primaryActionButton:focus {
+        outline: 2px solid #3b9eff;
+        outline-offset: 2px;
     }
 
     QPushButton#primaryActionButton:disabled {
@@ -308,21 +343,25 @@ def build_stylesheet() -> str:
         background-color: #1a2c3e;
         color: #8ba3bb;
         border: 1px solid #2a3f55;
-        border-radius: 10px;
-        padding: 11px 20px;
-        font-size: 12px;
+        border-radius: 12px;
+        padding: 14px 22px;
+        min-height: 52px;
+        font-size: 13px;
         font-weight: 600;
-        text-align: left;
+        text-align: center;
+        icon-size: 20px;
     }
 
     QPushButton#secondaryActionButton:hover {
         background-color: #1e3449;
         color: #c8dff0;
-        border-color: #3b6a91;
+        border-color: #3b9eff;
+        box-shadow: 0 4px 12px rgba(59, 158, 255, 0.15);
     }
 
     QPushButton#secondaryActionButton:pressed {
         background-color: #172940;
+        box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.6);
     }
 
     QPushButton#secondaryActionButton:disabled {
@@ -356,17 +395,26 @@ def build_stylesheet() -> str:
         color: #7f8c98;
     }
 
-    /* ── Consoles e texto ────────────────────────────────── */
+    /* ── Consoles e texto ────────────────────────────────────── */
     QTextEdit#resultsConsole, QTextEdit#pageConsole {
-        background-color: #0f1c28;
-        color: #98b8d0;
-        border: 1px solid #1e2d3d;
+        background: qlineargradient(
+            x1:0, y1:0, x2:0, y2:1,
+            stop:0 #0d1520,
+            stop:1 #0f1c28
+        );
+        color: #65d0ff;
+        border: 1px solid #1e3f5c;
         border-radius: 12px;
-        padding: 14px;
-        font-family: "Consolas", "Courier New", monospace;
-        font-size: 11px;
+        padding: 16px;
+        font-family: "Consolas", "Monaco", "Courier New", monospace;
+        font-size: 12px;
         selection-background-color: #1d4570;
         selection-color: #f0f6ff;
+        box-shadow: inset 0 1px 4px rgba(0, 0, 0, 0.5);
+    }
+
+    QTextEdit#resultsConsole:focus, QTextEdit#pageConsole:focus {
+        border: 1px solid #3b9eff;
     }
 
     /* ── Tabelas ─────────────────────────────────────────── */
