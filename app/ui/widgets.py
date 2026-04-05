@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -57,19 +58,21 @@ class MetricCard(CardFrame):
         *,
         icon: str = "",
     ) -> None:
-        super().__init__(parent)
+        super().__init__(parent, elevated=True)
         self.value_label = QLabel(value)
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(18, 16, 18, 16)
-        outer.setSpacing(6)
+        outer.setContentsMargins(20, 18, 20, 18)
+        outer.setSpacing(10)
 
         top = QHBoxLayout()
-        top.setSpacing(8)
+        top.setSpacing(10)
 
         if icon:
             icon_label = QLabel(icon)
-            icon_label.setStyleSheet("font-size: 18px; color: #3b9eff; background: transparent;")
+            icon_label.setObjectName("metricIcon")
+            icon_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            icon_label.setFixedSize(34, 34)
             top.addWidget(icon_label)
 
         label_widget = QLabel(label)
@@ -97,6 +100,10 @@ class ActionButton(QPushButton):
     """Botao padronizado para as principais operacoes do painel — com ícones Font Awesome."""
 
     triggered = Signal(str)
+    TILE_WIDE_MIN_WIDTH = 138
+    TILE_WIDE_MIN_HEIGHT = 108
+    TILE_WIDE_MAX_HEIGHT = 132
+    TILE_COMPACT_SIZE = 188
 
     def __init__(
         self,
@@ -112,36 +119,58 @@ class ActionButton(QPushButton):
         self.tile_mode = tile
 
         if tile:
-            # ActionTile com ícone grande (48px)
-            self.setText(label)
             self.setObjectName("actionTile")
-            self.setMinimumSize(140, 120)    # Era 110x90
-            self.setMaximumSize(180, 140)
-            
-            # Adicionar ícone Font Awesome 48px
-            icon_name = ICON_MAP.get(action_key, "dashboard")
-            btn_icon = get_icon(icon_name, size=48, color="#3b9eff")
-            if btn_icon:
-                self.setIcon(btn_icon)
-                self.setIconSize(QSize(48, 48))
+            self.setMinimumSize(self.TILE_WIDE_MIN_WIDTH, self.TILE_WIDE_MIN_HEIGHT)
+            self.setMinimumHeight(self.TILE_WIDE_MIN_HEIGHT)
+            self.setMaximumHeight(self.TILE_WIDE_MAX_HEIGHT)
+            self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         else:
-            # Botão inline com ícone pequeno (20px)
-            self.setText(label)
             self.setObjectName(
                 "secondaryActionButton" if style_variant == "secondary" else "primaryActionButton"
             )
-            self.setMinimumHeight(52)    # Era 46
-            
-            # Adicionar ícone Font Awesome 20px
-            icon_name = ICON_MAP.get(action_key, "dashboard")
-            color = "white" if style_variant == "primary" else "#8ba3bb"
-            btn_icon = get_icon(icon_name, size=20, color=color)
-            if btn_icon:
-                self.setIcon(btn_icon)
-                self.setIconSize(QSize(20, 20))
+            self.setMinimumHeight(54)
 
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.clicked.connect(self._emit_triggered)
+        self.update_action(action_key, label)
+
+    def update_action(self, action_key: str, label: str) -> None:
+        """Atualiza identificador, texto e icone sem recriar o botao."""
+        self.action_key = action_key
+        self.setText(label)
+
+        if self.tile_mode:
+            icon_name = ICON_MAP.get(action_key, "dashboard")
+            btn_icon = get_icon(icon_name, size=40, color="#f7fbff")
+            if btn_icon:
+                self.setIcon(btn_icon)
+                self.setIconSize(QSize(40, 40))
+            return
+
+        icon_name = ICON_MAP.get(action_key, "dashboard")
+        btn_icon = get_icon(icon_name, size=20, color="#f7fbff")
+        if btn_icon:
+            self.setIcon(btn_icon)
+            self.setIconSize(QSize(20, 20))
+
+    def set_tile_compact(self, compact: bool, *, size: int | None = None) -> None:
+        """Alterna o tile entre formato amplo (grid) e quadrado (carrossel)."""
+        if not self.tile_mode:
+            return
+
+        if compact:
+            compact_size = size if size is not None else self.TILE_COMPACT_SIZE
+            self.setMinimumSize(compact_size, compact_size)
+            self.setMaximumSize(compact_size, compact_size)
+            self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            self.setIconSize(QSize(36, 36))
+            return
+
+        self.setMinimumSize(self.TILE_WIDE_MIN_WIDTH, self.TILE_WIDE_MIN_HEIGHT)
+        self.setMaximumWidth(16777215)
+        self.setMaximumHeight(self.TILE_WIDE_MAX_HEIGHT)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setIconSize(QSize(40, 40))
 
     def _emit_triggered(self) -> None:
         """Expone um sinal de alto nivel para a janela principal decidir a acao."""

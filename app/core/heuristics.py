@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import json
 import re
 import subprocess
 import sys
@@ -25,8 +26,8 @@ class HeuristicEvaluation:
 class HeuristicEngine:
     """Centraliza regras simples de pontuacao para diferentes tipos de sinal."""
 
-    TRUSTED_MAX_SCORE = 24
-    SUSPICIOUS_MAX_SCORE = 59
+    TRUSTED_MAX_SCORE = 19
+    SUSPICIOUS_MAX_SCORE = 69  # Aumentado de 59 para reduzir falsos positivos
 
     TRUSTED_PATH_MARKERS = (
         "\\windows\\system32\\",
@@ -61,29 +62,153 @@ class HeuristicEngine:
     }
 
     TRUSTED_NAME_PATH_HINTS: dict[str, tuple[str, ...]] = {
-        "steam.exe": ("\\program files", "\\steam\\"),
+        # ─── Windows System ────────────────────────────────────────
         "explorer.exe": ("\\windows\\",),
         "searchindexer.exe": ("\\windows\\system32\\",),
-        "chrome.exe": ("\\program files", "\\google\\chrome"),
-        "msedge.exe": ("\\program files", "\\microsoft\\edge"),
         "svchost.exe": ("\\windows\\system32\\",),
         "dwm.exe": ("\\windows\\system32\\",),
-        "filmoratray.exe": ("\\wondershare",),
+        "taskhostw.exe": ("\\windows\\system32\\",),
+        "conhost.exe": ("\\windows\\system32\\",),
+        "cmd.exe": ("\\windows\\system32\\",),
+        "powershell.exe": ("\\windows\\system32\\",),
+        "rundll32.exe": ("\\windows\\system32\\",),
+        "regsvr32.exe": ("\\windows\\system32\\",),
+        "svchost.exe": ("\\windows\\system32\\",),
+        "csrss.exe": ("\\windows\\system32\\",),
+        "lsass.exe": ("\\windows\\system32\\",),
+        "services.exe": ("\\windows\\system32\\",),
+        "winlogon.exe": ("\\windows\\system32\\",),
+        "smss.exe": ("\\windows\\system32\\",),
+        
+        # ─── Microsoft Applications ────────────────────────────────
+        "msedge.exe": ("\\program files", "\\microsoft\\edge"),
+        "microsoft edge.lnk": ("\\microsoft\\edge",),
+        "winword.exe": ("\\program files", "\\microsoft office"),
+        "excel.exe": ("\\program files", "\\microsoft office"),
+        "outlook.exe": ("\\program files", "\\microsoft office"),
+        "powerpnt.exe": ("\\program files", "\\microsoft office"),
+        "notepad.exe": ("\\windows\\",),
+        "mspaint.exe": ("\\windows\\",),
+        "calc.exe": ("\\windows\\",),
+        "onenote.exe": ("\\program files", "\\microsoft office"),
+        "skype.exe": ("\\program files", "\\skype"),
+        "teams.exe": ("\\program files", "\\microsoft\\teams"),
+        "onedrive.exe": ("\\program files", "\\microsoft onedrive"),
+        "windowsupdateforservicestackhostfile.exe": ("\\windows\\",),
+        
+        # ─── Google/Chrome ────────────────────────────────────────
+        "chrome.exe": ("\\program files", "\\google\\chrome"),
+        "google chrome.lnk": ("\\google\\chrome",),
+        "swiftshader_indirect.dll": ("\\google\\chrome",),
+        
+        # ─── Development Tools ────────────────────────────────────
+        "python.exe": ("\\python", "program files"),
+        "pythonw.exe": ("\\python", "program files"),
+        "python314.exe": ("\\python", "program files"),
+        "code.exe": ("\\microsoft vs code", "\\program files"),
+        "git.exe": ("\\git\\", "\\program files"),
+        "git-bash.exe": ("\\git\\", "program files"),
+        "github desktop.exe": ("\\github desktop", "\\program files"),
+        "idea.exe": ("\\jetbrains", "\\program files"),
+        "goland.exe": ("\\jetbrains", "\\program files"),
+        "webstorm.exe": ("\\jetbrains", "\\program files"),
+        "studio.exe": ("\\android studio", "\\program files"),
+        "java.exe": ("\\java", "program files"),
+        "javaw.exe": ("\\java", "program files"),
+        "javac.exe": ("\\java", "program files"),
+        "node.exe": ("\\nodejs", "program files"),
+        "npm.cmd": ("\\nodejs", "program files"),
+        "npm.ps1": ("\\nodejs", "program files"),
+        "pip.exe": ("\\python", "program files"),
+        "pip3.exe": ("\\python", "program files"),
+        
+        # ─── Entertainment & Misc ──────────────────────────────────
+        "steam.exe": ("\\program files", "\\steam\\"),
+        "steamworksexternalruntime.exe": ("\\steam\\",),
+        "discord.exe": ("\\discord", "\\program files"),
+        "vlc.exe": ("\\videolan", "\\program files"),
+        "7z.exe": ("\\7-zip", "\\program files"),
+        "winrar.exe": ("\\winrar", "\\program files"),
+        "unrar.exe": ("\\winrar", "program files"),
+        "filmoraPro.exe": ("\\fimesoft", "\\program files"),
+        "filmoratray.exe": ("\\wondershare", "\\program files"),
+        "audacity.exe": ("\\audacity", "\\program files"),
+        "ffmpeg.exe": ("\\ffmpeg", "program files"),
+        
+        # ─── Browser Extensions (Chromium) ─────────────────────────
+        "extension.crx": ("\\chrome\\extensions\\",),
+        "manifest.json": ("\\chrome\\extensions\\",),
     }
 
     TRUSTED_PUBLISHERS = (
+        # ─── Tech Giants ──────────────────────────────────────────
         "microsoft",
-        "valve",
         "google",
-        "wondershare",
+        "apple",
+        "amazon",
+        "meta",
+        "github",
+        "jetbrains",
+        "vmware",
+        "oracle",
+        
+        # ─── Development ─────────────────────────────────────────
+        "python software foundation",
+        "mozilla foundation",
+        "ruby core",
+        "node foundation",
+        "golang",
+        "rust foundation",
+        
+        # ─── Entertainment/Media ─────────────────────────────────
+        "valve",
+        "discord",
+        "riot games",
+        "epic games",
+        "steam",
+        
+        # ─── Utilities ───────────────────────────────────────────
+        "7-zip",
+        "winrar",
         "adobe",
         "nvidia",
+        "amd",
+        "intel",
+        "realtek",
+        "logitech",
+        "corsair",
+        
+        # ─── Other ──────────────────────────────────────────────
+        "wondershare",
+        "davinci resolve",
+        "blender",
     )
 
     _LEET_TRANSLATION = str.maketrans({"0": "o", "1": "l", "3": "e", "4": "a", "5": "s", "7": "t", "$": "s", "@": "a"})
 
-    def __init__(self) -> None:
+    def __init__(self, trusted_hashes_file: Path | None = None) -> None:
         self._signature_cache: dict[str, str | None] = {}
+        self._trusted_hashes: set[str] = self._load_trusted_hashes(trusted_hashes_file)
+
+    def _load_trusted_hashes(self, hashes_file: Path | None) -> set[str]:
+        """Carrega SHA-256 de arquivos que foram verificados como confiáveis."""
+        if hashes_file is None:
+            hashes_file = Path(__file__).parent.parent / "data" / "trusted_hashes.json"
+        
+        if not hashes_file.exists():
+            return set()
+        
+        try:
+            with hashes_file.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict) and "hashes" in data:
+                    return set(h.lower() for h in data["hashes"] if isinstance(h, str))
+                elif isinstance(data, list):
+                    return set(h.lower() for h in data if isinstance(h, str))
+        except (json.JSONDecodeError, OSError):
+            pass
+        
+        return set()
 
     def evaluate_file(
         self,
@@ -134,13 +259,17 @@ class HeuristicEngine:
             score += 30
             reasons.append("Executavel em pasta temporaria")
 
-        if is_script and (is_temporary_location or is_unusual_location):
+        if is_script and is_temporary_location:
             score += 25
-            reasons.append("Script em local suspeito")
+            reasons.append("Script em pasta temporaria")
+
+        if is_script and is_unusual_location:
+            score += 10
+            reasons.append("Script em pasta comum de download/documento")
 
         if is_executable and is_unusual_location:
-            score += 20
-            reasons.append("Executavel em local incomum")
+            score += 8
+            reasons.append("Executavel em pasta comum de download/documento")
 
         if self._is_windows_name_impostor(filename):
             score += 40
@@ -324,6 +453,18 @@ class HeuristicEngine:
         score += self._combined_signal_bonus(reasons)
         return max(0, score), reasons
 
+    def is_trusted_hash(self, sha256_hash: str) -> bool:
+        """Verifica se um arquivo está na whitelist de hashes confiáveis."""
+        return sha256_hash.lower() in self._trusted_hashes
+
+    def apply_trusted_hash_reduction(self, score: int, reasons: list[str], sha256_hash: str) -> tuple[int, list[str]]:
+        """Aplica redução massiva de score se o hash está confirmado como seguro."""
+        if self.is_trusted_hash(sha256_hash):
+            updated_reasons = list(reasons)
+            updated_reasons.append("Hash confirmado em whitelist de arquivos confiáveis")
+            return max(0, score - 80), updated_reasons
+        return score, reasons
+
     def resolve_signature_publisher(self, file_path: Path | None) -> str | None:
         """Retorna o publisher da assinatura digital no Windows quando disponivel.
 
@@ -405,11 +546,11 @@ class HeuristicEngine:
 
     def _classify_score(self, score: int) -> RiskLevel:
         """Converte pontuacao em classificacao textual de risco."""
-        if score >= 85:
+        if score >= 70:
             return RiskLevel.CRITICAL
-        if score >= 60:
+        if score >= 40:
             return RiskLevel.HIGH
-        if score >= 25:
+        if score >= 20:
             return RiskLevel.MEDIUM
         return RiskLevel.LOW
 

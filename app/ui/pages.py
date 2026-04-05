@@ -7,10 +7,13 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QProgressBar,
+    QScrollArea,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -18,49 +21,130 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QAbstractItemView, QComboBox
+from PySide6.QtWidgets import QAbstractItemView, QComboBox, QSizePolicy
 
 from app.core.bootstrap import ApplicationContext
 from app.data.history_models import HistoryEntry
 from app.services.audit_models import AuditCategory, AuditFinding, AuditReport, AuditSeverity, AuditStatus
 from app.services.quarantine_models import QuarantineItem
-from app.ui.panels import ActionsPanel, HeroStatusCard, ResultsPanel, SystemStatusPanel
+from app.ui.panels import ActionsPanel, ResultsPanel
 from app.ui.widgets import ActionButton, CardFrame, MetricCard, SectionHeader
 
 
 class DashboardPage(QWidget):
-    """Pagina inicial com hero de status, tiles de acao e log da sessao."""
+    """Dashboard compacto com foco principal no carrossel de modulos."""
 
     action_requested = Signal(str)
+    real_time_protection_toggled = Signal()
 
     def __init__(self, context: ApplicationContext, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._compact_mode = False
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(16)
+        layout.setSpacing(8)
 
-        # Hero card de status no topo
-        self.hero_card = HeroStatusCard()
-        layout.addWidget(self.hero_card)
+        # ── Faixa de status (topo) ──────────────────────────────────────────
+        self.status_bar_card = CardFrame(elevated=True)
+        self.status_bar_card.setObjectName("dashboardLeadCard")
+        self.status_bar_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        status_bar_layout = QHBoxLayout(self.status_bar_card)
+        status_bar_layout.setContentsMargins(14, 10, 14, 10)
+        status_bar_layout.setSpacing(10)
+        status_bar_layout.setAlignment(Qt.AlignmentFlag.AlignVCenter)
 
-        # Grid inferior: acoes (esquerda larga) + atividade (direita)
-        content = QGridLayout()
-        content.setHorizontalSpacing(16)
-        content.setVerticalSpacing(16)
+        self._protection_chip = QPushButton()
+        self._protection_chip.setCheckable(True)
+        self._protection_chip.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._protection_chip.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._protection_chip.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        self._protection_chip.clicked.connect(lambda _checked: self.real_time_protection_toggled.emit())
+        self.update_protection_ui_state(enabled=True)
 
-        self.system_status_panel = SystemStatusPanel(context)
+        self._threats_chip = QLabel("Ameacas: 0")
+        self._threats_chip.setObjectName("headerPill")
+        self._threats_chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self._quarantine_chip = QLabel("Quarentena: 0")
+        self._quarantine_chip.setObjectName("headerPill")
+        self._quarantine_chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._monitor_chip = QLabel("Monitor: ativo")
+        self._monitor_chip.setObjectName("headerPillAccent")
+        self._monitor_chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        title_label = QLabel("SentinelaPC  ●  Painel principal")
+        title_label.setObjectName("appKicker")
+
+        status_bar_layout.addWidget(title_label)
+        status_bar_layout.addStretch()
+        status_bar_layout.addWidget(self._protection_chip)
+        status_bar_layout.addWidget(self._threats_chip)
+        status_bar_layout.addWidget(self._quarantine_chip)
+        status_bar_layout.addWidget(self._monitor_chip)
+
+        layout.addWidget(self.status_bar_card)
+
+        # ── Carrossel de modulos ────────────────────────────────────────────
         self.actions_panel = ActionsPanel()
-        self.activity_panel = ResultsPanel()
-
+        self.actions_panel.set_carousel_prominent(True)
         self.actions_panel.action_requested.connect(self.action_requested.emit)
 
-        content.addWidget(self.system_status_panel, 0, 0, 1, 2)
-        content.addWidget(self.actions_panel, 1, 0, 1, 2)
-        content.addWidget(self.activity_panel, 2, 0, 1, 2)
-        content.setColumnStretch(0, 1)
-        content.setColumnStretch(1, 1)
+        # ── Painel de atividade (com scroll proprio) ────────────────────────
+        self.activity_panel = ResultsPanel()
+        self.activity_panel.set_compact(True)
 
-        layout.addLayout(content, 1)
+        self._content_layout = QVBoxLayout()
+        self._content_layout.setContentsMargins(0, 0, 0, 0)
+        self._content_layout.setSpacing(8)
+        self._content_layout.addWidget(self.actions_panel)
+        self._content_layout.addWidget(self.activity_panel, 1)
+
+        layout.addLayout(self._content_layout, 1)
+        self._apply_compact_mode(True)
+
+    def _apply_compact_mode(self, compact: bool) -> None:
+        if compact == self._compact_mode:
+            return
+        self._compact_mode = compact
+
+        # Mantem a barra responsiva ao conteudo para evitar corte em DPI alto.
+        self.status_bar_card.setMinimumHeight(58 if compact else 66)
+        self.status_bar_card.setMaximumHeight(16777215)
+        self.actions_panel.set_carousel_prominent(True)
+        self.activity_panel.set_compact(compact)
+
+    def update_status_summary(self, threats: int = 0, quarantine: int = 0) -> None:
+        """Atualiza os chips de ameacas e quarentena na faixa de status."""
+        self._threats_chip.setText(f"Ameacas: {threats}")
+        if threats > 0:
+            self._threats_chip.setObjectName("headerPillAccent")
+        else:
+            self._threats_chip.setObjectName("headerPill")
+        self._threats_chip.style().unpolish(self._threats_chip)
+        self._threats_chip.style().polish(self._threats_chip)
+        self._quarantine_chip.setText(f"Quarentena: {quarantine}")
+
+    def update_protection_ui_state(self, *, enabled: bool) -> None:
+        """Atualiza o chip clicavel de protecao em tempo real (ON/OFF)."""
+        self._protection_chip.setChecked(enabled)
+        self._protection_chip.setText("Protecao ativada" if enabled else "Protecao desativada")
+        self._protection_chip.setObjectName(
+            "realTimeProtectionToggleOn" if enabled else "realTimeProtectionToggleOff"
+        )
+        self._protection_chip.style().unpolish(self._protection_chip)
+        self._protection_chip.style().polish(self._protection_chip)
+
+    def update_monitor_status(self, label: str, *, alert: bool = False, inactive: bool = False) -> None:
+        """Atualiza o chip de monitoramento de pre-execucao na faixa de status."""
+        self._monitor_chip.setText(label)
+        if inactive:
+            new_obj = "headerPillMuted"
+        else:
+            new_obj = "headerPillAccent" if not alert else "headerPillWarn"
+        self._monitor_chip.setObjectName(new_obj)
+        self._monitor_chip.style().unpolish(self._monitor_chip)
+        self._monitor_chip.style().polish(self._monitor_chip)
 
     def append_activity(self, lines: Sequence[str]) -> None:
         """Adiciona mensagens ao painel de atividade da sessao."""
@@ -82,9 +166,33 @@ class OperationPage(QWidget):
     ) -> None:
         super().__init__(parent)
         self._action_buttons: dict[str, ActionButton] = {}
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(18)
+
+        # ── Scroll area interno ───────────────────────────────────────────────
+        # Isola a altura desta página do QStackedWidget: sem scroll externo,
+        # o sizeHint() de QStackedWidget seria o máximo de TODAS as páginas
+        # (causando inflar a área disponível para o dashboard). Com scroll interno,
+        # o sizeHint desta página é pequeno (tamanho do viewport), e ela rola
+        # verticalmente quando o conteúdo excede a janela.
+        _scroll = QScrollArea()
+        _scroll.setObjectName("operationScrollArea")
+        _scroll.setWidgetResizable(True)
+        _scroll.setFrameShape(QFrame.Shape.NoFrame)
+        _scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        _scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        _content = QWidget()
+        layout = QVBoxLayout(_content)
+        layout.setContentsMargins(0, 4, 0, 12)
+        layout.setSpacing(14)
+        _scroll.setWidget(_content)
+        _outer = QVBoxLayout(self)
+        _outer.setContentsMargins(0, 0, 0, 0)
+        _outer.setSpacing(0)
+        _outer.addWidget(_scroll, 1)
+
+        header_card = CardFrame(elevated=True)
+        header_layout = QVBoxLayout(header_card)
+        header_layout.setContentsMargins(24, 22, 24, 22)
+        header_layout.setSpacing(6)
 
         eyebrow_label = QLabel(eyebrow)
         eyebrow_label.setObjectName("pageEyebrow")
@@ -94,9 +202,10 @@ class OperationPage(QWidget):
         description_label.setObjectName("pageSubtitle")
         description_label.setWordWrap(True)
 
-        layout.addWidget(eyebrow_label)
-        layout.addWidget(title_label)
-        layout.addWidget(description_label)
+        header_layout.addWidget(eyebrow_label)
+        header_layout.addWidget(title_label)
+        header_layout.addWidget(description_label)
+        layout.addWidget(header_card)
 
         metrics_layout = QHBoxLayout()
         metrics_layout.setSpacing(14)
@@ -117,12 +226,13 @@ class OperationPage(QWidget):
             "Horario do ultimo resultado mostrado nesta tela.",
         )
 
-        metrics_layout.addWidget(self.analyzed_metric)
-        metrics_layout.addWidget(self.suspicious_metric)
-        metrics_layout.addWidget(self.session_metric)
+        metrics_layout.addWidget(self.analyzed_metric, 1)
+        metrics_layout.addWidget(self.suspicious_metric, 1)
+        metrics_layout.addWidget(self.session_metric, 1)
         layout.addLayout(metrics_layout)
 
         progress_card = CardFrame()
+        progress_card.setObjectName("featureCard")
         progress_layout = QVBoxLayout(progress_card)
         progress_layout.setContentsMargins(20, 16, 20, 16)
         progress_layout.setSpacing(8)
@@ -152,31 +262,40 @@ class OperationPage(QWidget):
         layout.addWidget(progress_card)
 
         action_card = CardFrame()
-        action_layout = QHBoxLayout(action_card)
+        action_card.setObjectName("toolbarCard")
+        action_layout = QGridLayout(action_card)
         action_layout.setContentsMargins(20, 18, 20, 18)
-        action_layout.setSpacing(12)
+        action_layout.setHorizontalSpacing(10)
+        action_layout.setVerticalSpacing(10)
 
-        for action_key, label in actions:
+        _max_cols = 3
+        for _idx, (action_key, label) in enumerate(actions):
             button = ActionButton(action_key, label)
             button.setMinimumHeight(46)
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             button.triggered.connect(self.action_requested.emit)
             self._action_buttons[action_key] = button
-            action_layout.addWidget(button)
+            action_layout.addWidget(button, _idx // _max_cols, _idx % _max_cols)
 
-        action_layout.addStretch()
+        for _col in range(_max_cols):
+            action_layout.setColumnStretch(_col, 1)
         layout.addWidget(action_card)
 
         navigation_card = CardFrame()
-        navigation_layout = QHBoxLayout(navigation_card)
-        navigation_layout.setContentsMargins(20, 18, 20, 18)
-        navigation_layout.setSpacing(12)
+        navigation_card.setObjectName("toolbarCard")
+        navigation_layout = QVBoxLayout(navigation_card)
+        navigation_layout.setContentsMargins(20, 18, 20, 14)
+        navigation_layout.setSpacing(10)
         navigation_layout.addWidget(
             SectionHeader(
                 "Acesso rapido",
                 "Volte ao painel principal ou navegue direto para as areas mais usadas sem depender apenas da barra lateral.",
             )
         )
-        navigation_layout.addStretch()
+
+        _nav_buttons_row = QHBoxLayout()
+        _nav_buttons_row.setContentsMargins(0, 0, 0, 0)
+        _nav_buttons_row.setSpacing(10)
 
         for action_key, label in (
             ("open_dashboard", "Pagina principal"),
@@ -186,11 +305,14 @@ class OperationPage(QWidget):
             button = ActionButton(action_key, label, style_variant="secondary")
             button.setMinimumHeight(44)
             button.triggered.connect(self.action_requested.emit)
-            navigation_layout.addWidget(button)
+            _nav_buttons_row.addWidget(button)
 
+        _nav_buttons_row.addStretch()
+        navigation_layout.addLayout(_nav_buttons_row)
         layout.addWidget(navigation_card)
 
         self.console_card = CardFrame()
+        self.console_card.setObjectName("featureCard")
         console_layout = QVBoxLayout(self.console_card)
         console_layout.setContentsMargins(20, 18, 20, 18)
         console_layout.setSpacing(14)
@@ -204,8 +326,12 @@ class OperationPage(QWidget):
         self.console = QTextEdit()
         self.console.setObjectName("pageConsole")
         self.console.setReadOnly(True)
+        # Altura mínima garante que o console seja visível após as seções superiores.
+        # O scroll interno da página exibe scrollbar se o conteúdo total exceder
+        # a altura da janela; o QTextEdit rola internamente para o seu conteúdo.
+        self.console.setMinimumHeight(220)
         console_layout.addWidget(self.console)
-        layout.addWidget(self.console_card, 1)
+        layout.addWidget(self.console_card)
 
     def append_lines(self, lines: Sequence[str]) -> None:
         """Adiciona linhas ao console principal desta tela."""
@@ -300,6 +426,7 @@ class QuarantinePage(QWidget):
             ("open_files", "Arquivos suspeitos", "secondary"),
             ("refresh_quarantine", "Atualizar lista", "primary"),
             ("restore_quarantine", "Restaurar selecionado", "primary"),
+            ("restore_all_quarantine", "Restaurar todos", "primary"),
             ("delete_quarantine", "Excluir selecionado", "primary"),
         ):
             button = ActionButton(action_key, label, style_variant=variant)
@@ -594,9 +721,24 @@ class AuditPage(QWidget):
         self._current_findings: list[AuditFinding] = []
         self._visible_row_to_finding: dict[int, int] = {}
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(18)
+        # ── Scroll area interno ───────────────────────────────────────────────
+        # Mesma lógica da OperationPage: isola o sizeHint desta página do
+        # QStackedWidget, evitando que ele infle o espaço do dashboard.
+        _scroll = QScrollArea()
+        _scroll.setObjectName("auditScrollArea")
+        _scroll.setWidgetResizable(True)
+        _scroll.setFrameShape(QFrame.Shape.NoFrame)
+        _scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        _scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        _content = QWidget()
+        layout = QVBoxLayout(_content)
+        layout.setContentsMargins(0, 4, 0, 12)
+        layout.setSpacing(14)
+        _scroll.setWidget(_content)
+        _outer = QVBoxLayout(self)
+        _outer.setContentsMargins(0, 0, 0, 0)
+        _outer.setSpacing(0)
+        _outer.addWidget(_scroll, 1)
 
         eyebrow = QLabel("Seguranca avancada do sistema")
         eyebrow.setObjectName("pageEyebrow")
@@ -604,7 +746,7 @@ class AuditPage(QWidget):
         title.setObjectName("pageTitleLarge")
         subtitle = QLabel(
             "Verificacao tecnica de configuracoes de seguranca, firewall, acesso remoto, privacidade e protecao de dados. "
-            "Cada achado inclui evidencia e recomendacao."
+            "Cada achado inclui evidencia e recomendacao. Selecione um ou mais itens para resolver apenas o que voce escolher."
         )
         subtitle.setObjectName("pageSubtitle")
         subtitle.setWordWrap(True)
@@ -660,7 +802,7 @@ class AuditPage(QWidget):
         for action_key, label in (
             ("audit_run", "Executar Auditoria"),
             ("audit_stop", "Parar Auditoria"),
-            ("audit_resolve", "Resolver problemas"),
+            ("audit_resolve", "Resolver selecionados"),
             ("export_audit_txt", "Exportar TXT"),
             ("export_audit_json", "Exportar JSON"),
         ):
@@ -704,16 +846,17 @@ class AuditPage(QWidget):
         )
         self._table = QTableWidget(0, 6)
         self._table.setObjectName("dataTable")
+        self._table.setMinimumHeight(160)
         self._table.setHorizontalHeaderLabels(
             ["Categoria", "Problema", "Severidade", "Status", "Score", "Evidencia resumida"]
         )
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._table.verticalHeader().setVisible(False)
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.setAlternatingRowColors(True)
-        self._table.currentItemChanged.connect(self._on_row_changed)
+        self._table.itemSelectionChanged.connect(self._on_selection_changed)
         table_layout.addWidget(self._table)
 
         self._detail_panel = QTextEdit()
@@ -740,6 +883,8 @@ class AuditPage(QWidget):
         self._update_count_label()
         if issues_count == 0:
             self._detail_panel.setPlainText("Nenhum problema de seguranca foi encontrado nesta auditoria.")
+        elif self._table.rowCount() > 0:
+            self._table.selectRow(0)
 
     def clear_results(self) -> None:
         self._current_findings = []
@@ -777,18 +922,31 @@ class AuditPage(QWidget):
 
     def selected_finding(self) -> AuditFinding | None:
         """Retorna o achado atualmente selecionado na tabela."""
-        current_row = self._table.currentRow()
-        if current_row < 0:
+        selected = self.selected_findings()
+        if not selected:
             return None
-        finding_index = self._visible_row_to_finding.get(current_row)
-        if finding_index is None:
-            return None
-        return self._current_findings[finding_index]
+        return selected[0]
+
+    def selected_findings(self) -> list[AuditFinding]:
+        """Retorna todos os achados selecionados atualmente na tabela filtrada."""
+        selection_model = self._table.selectionModel()
+        if selection_model is None:
+            return []
+
+        findings: list[AuditFinding] = []
+        for model_index in selection_model.selectedRows():
+            finding_index = self._visible_row_to_finding.get(model_index.row())
+            if finding_index is None:
+                continue
+            findings.append(self._current_findings[finding_index])
+        return findings
 
     def _apply_filter(self) -> None:
         self._rebuild_table()
         self._update_count_label()
         self._detail_panel.clear()
+        if self._table.rowCount() > 0:
+            self._table.selectRow(0)
 
     def _rebuild_table(self) -> None:
         self._table.setRowCount(0)
@@ -832,16 +990,37 @@ class AuditPage(QWidget):
             return
         self._count_label.setText(f"Exibindo {visible} de {total} achados.")
 
-    def _on_row_changed(self, current: QTableWidgetItem | None, previous: QTableWidgetItem | None) -> None:
-        if current is None:
+    def _on_selection_changed(self) -> None:
+        selected = self.selected_findings()
+        if not selected:
+            self._detail_panel.clear()
             return
-        finding_index = self._visible_row_to_finding.get(current.row())
-        if finding_index is None:
+
+        if len(selected) > 1:
+            auto_count = sum(1 for finding in selected if finding.auto_resolvable and finding.resolver_key)
+            manual_count = len(selected) - auto_count
+            lines = [
+                f"{len(selected)} achados selecionados.",
+                f"Com correcao automatica suportada: {auto_count}",
+                f"Com tratamento guiado/manual: {manual_count}",
+                "",
+                "Itens selecionados:",
+            ]
+            for finding in selected:
+                mode = "Automatico" if finding.auto_resolvable and finding.resolver_key else "Guiado/manual"
+                lines.append(
+                    f"- {finding.problem_name} | categoria={finding.category.value} | severidade={finding.severity.value} | modo={mode}"
+                )
+            self._detail_panel.setPlainText("\n".join(lines))
             return
-        finding = self._current_findings[finding_index]
+
+        finding = selected[0]
         lines = [
             f"Problema: {finding.problem_name}",
             f"Categoria: {finding.category.value} | Severidade: {finding.severity.value} | Status: {finding.status.value} | Score: {finding.score}",
+            (
+                f"Modo de tratamento: {'Correcao automatica suportada' if finding.auto_resolvable and finding.resolver_key else 'Tratamento guiado/manual'}"
+            ),
             "",
         ]
         if finding.evidence:

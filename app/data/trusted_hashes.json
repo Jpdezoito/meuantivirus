@@ -1,0 +1,10 @@
+{
+  "description": "Lista de SHA-256 de arquivos verificados como confiáveis. Adicione hashes aqui para evitar falsos positivos.",
+  "hashes": [
+    "ADICIONE_HASHES_SHA256_AQUI"
+  ],
+  "examples": {
+    "python_installer": "exemplo_hash_sha256_aqui",
+    "vs_code_installer": "exemplo_hash_sha256_aqui"
+  }
+}

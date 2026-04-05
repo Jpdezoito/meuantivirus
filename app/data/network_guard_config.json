@@ -1,0 +1,9 @@
+{
+  "allowlist_ips": [],
+  "allowlist_cidrs": [],
+  "auto_block_enabled": true,
+  "auto_block_duration_seconds": 1800,
+  "inbound_scan_distinct_ports_threshold": 9,
+  "inbound_scan_min_events": 15,
+  "inbound_scan_min_rate_per_second": 2.5
+}

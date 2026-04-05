@@ -70,6 +70,8 @@ class AuditFinding:
     resolver_key: str | None = None
     # Indica se o item pode ser resolvido automaticamente pelo aplicativo
     auto_resolvable: bool = False
+    # Metadados estruturados para resolucao automatica ou guiada de itens especificos
+    context_data: dict[str, str] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------

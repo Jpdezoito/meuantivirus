@@ -43,6 +43,7 @@ from app.services.audit_models import (
     AuditSeverity,
     AuditStatus,
 )
+from app.services.edge_extension_models import EdgeExtensionRecord
 from app.services.email_scan_models import EmailScanItem
 from app.services.email_security_service import EmailSecurityService
 from app.services.file_scanner_service import ScanControl
@@ -77,6 +78,31 @@ class AuditService:
         self._logger = logger
         self._browser_service = browser_service
         self._email_service = email_service
+
+    _REQUIRES_ADMIN_KEYS = {
+        "firewall_public_enable",
+        "firewall_private_enable",
+        "firewall_domain_enable",
+        "remote_assistance_disable",
+        "rdp_disable",
+        "blank_password_remote_restrict",
+        "winrm_disable",
+        "smb1_disable",
+        "controlled_folder_access_enable",
+        "dep_enable_optin",
+        "uac_enable",
+        "uac_prompt_enable",
+        "smartscreen_enable",
+        "defender_realtime_enable",
+        "dns_secure_set",
+    }
+    _RESTART_LIKELY_KEYS = {
+        "rdp_disable",
+        "winrm_disable",
+        "smb1_disable",
+        "dep_enable_optin",
+        "uac_enable",
+    }
 
     # ------------------------------------------------------------------
     # Metodo principal de execucao da auditoria
@@ -218,26 +244,7 @@ class AuditService:
                 details=[finding.recommendation or "Use a recomendacao exibida para tratar o item manualmente."],
             )
 
-        requires_admin_keys = {
-            "firewall_public_enable",
-            "firewall_private_enable",
-            "firewall_domain_enable",
-            "remote_assistance_disable",
-            "rdp_disable",
-            "blank_password_remote_restrict",
-            "winrm_disable",
-            "smb1_disable",
-            "controlled_folder_access_enable",
-            "dep_enable_optin",
-            "uac_enable",
-            "uac_prompt_enable",
-            "smartscreen_enable",
-            "defender_realtime_enable",
-            "dns_secure_set",
-        }
-        restart_likely_keys = {"rdp_disable", "winrm_disable", "smb1_disable", "dep_enable_optin", "uac_enable"}
-
-        needs_admin = resolver_key in requires_admin_keys or resolver_key.startswith("block_inbound_port_")
+        needs_admin = self.finding_requires_admin(finding)
         if needs_admin and not self._is_running_as_admin():
             return AuditResolutionResult(
                 applied=False,
@@ -247,7 +254,7 @@ class AuditService:
                     "Feche o SentinelaPC e execute o aplicativo como administrador.",
                     finding.recommendation or "Aplique manualmente se preferir.",
                 ],
-                requires_restart=resolver_key in restart_likely_keys,
+                requires_restart=self.finding_requires_restart(finding),
             )
 
         try:
@@ -375,19 +382,55 @@ class AuditService:
                     timeout=25,
                 )
                 return AuditResolutionResult(True, "DNS alterado para Cloudflare (1.1.1.1) em todos os adaptadores ativos.")
+            if resolver_key == "edge_extension_quarantine":
+                if self._browser_service is None:
+                    return AuditResolutionResult(
+                        applied=False,
+                        message="Servico de seguranca do navegador indisponivel para aplicar quarentena.",
+                        details=[
+                            "Reinicie o SentinelaPC para reconfigurar os servicos internos.",
+                            finding.recommendation or "Aplique a acao manualmente no Edge.",
+                        ],
+                    )
+                extension = self._resolve_edge_extension_record_from_finding(finding)
+                if extension is None:
+                    return AuditResolutionResult(
+                        applied=False,
+                        message="A extensao Edge selecionada nao foi encontrada no inventario atual.",
+                        details=[
+                            "Atualize o inventario do Edge e reexecute a auditoria para sincronizar os dados.",
+                            finding.recommendation or "Revise manualmente a extensao no navegador.",
+                        ],
+                    )
+                action_result = self._browser_service.quarantine_edge_extension(extension, user_confirmed=True)
+                details = []
+                if action_result.quarantine_path is not None:
+                    details.append(f"Destino na quarentena: {action_result.quarantine_path}")
+                if action_result.backup_paths:
+                    details.append(f"Backups criados: {len(action_result.backup_paths)}")
+                details.extend(action_result.warnings)
+                return AuditResolutionResult(
+                    applied=action_result.success,
+                    message=action_result.message,
+                    details=details,
+                    requires_restart=False,
+                )
         except Exception as exc:
             log_warning(self._logger, f"Falha ao resolver achado '{finding.problem_name}': {exc}")
             details = [f"Erro: {type(exc).__name__}: {exc}"]
             if not self._is_running_as_admin() and (
-                resolver_key in requires_admin_keys or resolver_key.startswith("block_inbound_port_")
+                self.finding_requires_admin(finding)
             ):
                 details.append("Dica: execute o SentinelaPC como administrador para aplicar este tipo de correcao.")
+            preview = self.preview_resolution_command(finding)
+            if preview:
+                details.append(f"Comando/referencia de debug: {preview}")
             details.append(finding.recommendation or "Execute a acao manualmente.")
             return AuditResolutionResult(
                 applied=False,
                 message="Nao foi possivel aplicar a correcao automatica.",
                 details=details,
-                requires_restart=resolver_key in restart_likely_keys,
+                requires_restart=self.finding_requires_restart(finding),
             )
 
         return AuditResolutionResult(
@@ -395,6 +438,170 @@ class AuditService:
             message="Este achado exige tratamento manual ou revisao do usuario.",
             details=[finding.recommendation or "Sem recomendacao adicional disponivel."],
         )
+
+    def finding_requires_admin(self, finding: AuditFinding) -> bool:
+        """Indica se a resolucao do achado precisa de privilegios administrativos."""
+        resolver_key = finding.resolver_key or ""
+        return resolver_key in self._REQUIRES_ADMIN_KEYS or resolver_key.startswith("block_inbound_port_")
+
+    def finding_requires_restart(self, finding: AuditFinding) -> bool:
+        """Indica se a correcao do achado tende a exigir reinicializacao."""
+        resolver_key = finding.resolver_key or ""
+        return resolver_key in self._RESTART_LIKELY_KEYS
+
+    def preview_resolution_command(self, finding: AuditFinding) -> str:
+        """Retorna um preview do comando ou caminho tecnico associado ao achado."""
+        resolver_key = finding.resolver_key or ""
+        if resolver_key.startswith("block_inbound_port_"):
+            port = resolver_key.removeprefix("block_inbound_port_").strip()
+            return (
+                "New-NetFirewallRule -DisplayName 'SentinelaPC Block Inbound Port "
+                f"{port}' -Direction Inbound -Action Block -Protocol TCP -LocalPort {port} -Profile Any"
+            )
+
+        previews = {
+            "firewall_public_enable": "Set-NetFirewallProfile -Profile Public -Enabled True",
+            "firewall_private_enable": "Set-NetFirewallProfile -Profile Private -Enabled True",
+            "firewall_domain_enable": "Set-NetFirewallProfile -Profile Domain -Enabled True",
+            "proxy_disable": "Set-ItemProperty HKCU:\\...\\Internet Settings ProxyEnable=0",
+            "remote_assistance_disable": "Set-ItemProperty HKLM:\\...\\Remote Assistance fAllowToGetHelp=0",
+            "rdp_disable": "Set-ItemProperty HKLM:\\...\\Terminal Server fDenyTSConnections=1",
+            "lock_screen_notifications_disable": "Set-ItemProperty HKCU:\\...\\PushNotifications LockScreenToastEnabled=0",
+            "blank_password_remote_restrict": "Set-ItemProperty HKLM:\\...\\Lsa LimitBlankPasswordUse=1",
+            "winrm_disable": "Disable-PSRemoting -Force",
+            "smb1_disable": "Set-SmbServerConfiguration -EnableSMB1Protocol $false -Force",
+            "controlled_folder_access_enable": "Set-MpPreference -EnableControlledFolderAccess Enabled",
+            "dep_enable_optin": "bcdedit /set {current} nx OptIn",
+            "uac_enable": "Set-ItemProperty HKLM:\\...\\Policies\\System EnableLUA=1",
+            "uac_prompt_enable": "Set-ItemProperty HKLM:\\...\\Policies\\System ConsentPromptBehaviorAdmin=5",
+            "smartscreen_enable": "Set-ItemProperty HKLM:\\...\\Explorer SmartScreenEnabled=Warn",
+            "defender_realtime_enable": "Set-MpPreference -DisableRealtimeMonitoring $false",
+            "webcam_desktop_apps_restrict": "Remove-Item HKCU:\\...\\ConsentStore\\webcam\\NonPackaged -Recurse -Force",
+            "microphone_desktop_apps_restrict": "Remove-Item HKCU:\\...\\ConsentStore\\microphone\\NonPackaged -Recurse -Force",
+            "dns_secure_set": "Set-DnsClientServerAddress ... -ServerAddresses ('1.1.1.1','1.0.0.1')",
+            "edge_extension_quarantine": "Mover extensao Edge suspeita para a quarentena do SentinelaPC, com backup de Preferences/Secure Preferences.",
+        }
+        return previews.get(resolver_key, "")
+
+    def build_debug_resolution_plan(self, finding: AuditFinding) -> AuditResolutionResult:
+        """Gera um plano tecnico guiado para qualquer achado, inclusive os manuais."""
+        finding = self.prepare_finding_for_resolution(finding)
+        details: list[str] = []
+
+        if finding.evidence:
+            details.append("Evidencias observadas:")
+            details.extend(f"- {evidence}" for evidence in finding.evidence)
+
+        if finding.auto_resolvable and finding.resolver_key:
+            details.append("Modo sugerido: correcao automatica pelo SentinelaPC quando este item for selecionado.")
+            details.append(f"Resolver interno: {finding.resolver_key}")
+            details.append(f"Exige administrador: {'sim' if self.finding_requires_admin(finding) else 'nao'}")
+            preview = self.preview_resolution_command(finding)
+            if preview:
+                details.append(f"Preview tecnico: {preview}")
+            if finding.recommendation:
+                details.append(f"Recomendacao: {finding.recommendation}")
+            return AuditResolutionResult(
+                applied=False,
+                message="Este achado possui correcao automatica suportada pelo SentinelaPC.",
+                details=details,
+                requires_restart=self.finding_requires_restart(finding),
+            )
+
+        details.append("Modo sugerido: tratamento manual assistido com debug.")
+        details.extend(self._build_manual_debug_steps(finding))
+        if finding.recommendation:
+            details.append(f"Recomendacao: {finding.recommendation}")
+        return AuditResolutionResult(
+            applied=False,
+            message="Este achado exige tratamento manual assistido.",
+            details=details,
+            requires_restart=self.finding_requires_restart(finding),
+        )
+
+    def prepare_finding_for_resolution(self, finding: AuditFinding) -> AuditFinding:
+        """Enriquece achados antigos com metadados de resolucao quando possivel."""
+        if finding.resolver_key:
+            return finding
+
+        if finding.category != AuditCategory.BROWSER:
+            return finding
+
+        if not finding.problem_name.startswith("Edge: Extensao Edge suspeito"):
+            return finding
+
+        profile_name = ""
+        extension_id = ""
+        install_path = ""
+        for entry in finding.evidence:
+            if entry.startswith("Perfil: "):
+                profile_name = entry.removeprefix("Perfil: ").strip()
+            elif entry.startswith("ID da extensao: "):
+                extension_id = entry.removeprefix("ID da extensao: ").strip()
+            elif entry.startswith("Caminho: "):
+                install_path = entry.removeprefix("Caminho: ").strip()
+
+        if not profile_name or not extension_id or not install_path:
+            return finding
+
+        return dataclasses.replace(
+            finding,
+            resolver_key="edge_extension_quarantine",
+            auto_resolvable=True,
+            context_data={
+                "browser": "Edge",
+                "profile_name": profile_name,
+                "extension_id": extension_id,
+                "install_path": install_path,
+            },
+        )
+
+    def _build_manual_debug_steps(self, finding: AuditFinding) -> list[str]:
+        """Monta passos tecnicos de debug para achados sem automacao segura."""
+        problem_name = finding.problem_name.lower()
+        category = finding.category
+
+        if "atualizacoes de seguranca" in problem_name:
+            return [
+                "Abra Configuracoes > Windows Update > Verificar atualizacoes.",
+                "Se a busca falhar, execute o solucionador de problemas do Windows Update.",
+                "Comando de apoio: UsoClient StartScan",
+            ]
+        if "bitlocker" in problem_name:
+            return [
+                "Abra Painel de Controle > BitLocker Drive Encryption e revise o disco do sistema.",
+                "Confirme se a edicao do Windows suporta BitLocker e se o TPM esta pronto.",
+                "Comando de apoio: manage-bde -status",
+            ]
+        if "credenciais armazenadas" in problem_name:
+            return [
+                "Revise os navegadores listados nas evidencias e apague senhas salvas apenas se desejar.",
+                "Feche o navegador antes de alterar o armazenamento local de credenciais.",
+                "Prefira migrar para um gerenciador dedicado com senha mestra.",
+            ]
+        if "rede wi-fi" in problem_name:
+            return [
+                "Evite continuar conectado a esta rede para atividades sensiveis.",
+                "Abra as configuracoes do roteador e troque a seguranca para WPA2 ou WPA3.",
+                "Se a rede for publica, use VPN e marque a rede como Publica no Windows.",
+            ]
+        if finding.category == AuditCategory.BROWSER:
+            return [
+                "Revise a extensao, arquivo ou configuracao de navegador apontada nas evidencias.",
+                "Se o risco vier de extensao suspeita, use o gerenciador de extensoes Edge/Chrome para desativar ou remover somente o item selecionado.",
+                "Reexecute a auditoria depois da correcao manual para confirmar o estado.",
+            ]
+        if finding.category == AuditCategory.EMAIL:
+            return [
+                "Revise manualmente a origem do e-mail ou anexo destacado nas evidencias.",
+                "Se houver arquivo local relacionado, mova apenas o item suspeito para quarentena.",
+                "Reexecute a analise de e-mails para validar o resultado apos a acao manual.",
+            ]
+        return [
+            "Revise as evidencias deste achado e compare com a recomendacao exibida.",
+            "Aplique a mudanca apenas ao item selecionado e reexecute a auditoria para validar.",
+            "Se necessario, execute o SentinelaPC como administrador para acessar configuracoes do Windows.",
+        ]
 
     # ------------------------------------------------------------------
     # Grupo 1 — Configuracoes do sistema
@@ -2060,8 +2267,30 @@ class AuditService:
         evidence = [f"Navegador: {item.browser}", f"Tipo: {item.item_type}"]
         if item.path is not None:
             evidence.append(f"Caminho: {item.path}")
+        if item.profile_name:
+            evidence.append(f"Perfil: {item.profile_name}")
+        if item.extension_id:
+            evidence.append(f"ID da extensao: {item.extension_id}")
+        if item.version:
+            evidence.append(f"Versao: {item.version}")
+        if item.status:
+            evidence.append(f"Status atual: {item.status}")
         evidence.extend(item.reasons)
         recommendation = self._browser_recommendation(item)
+        resolver_key: str | None = None
+        auto_resolvable = False
+        context_data: dict[str, str] = {}
+
+        if item.browser == "Edge" and item.item_type == "Extensao Edge" and item.extension_id and item.profile_name and item.path is not None:
+            resolver_key = "edge_extension_quarantine"
+            auto_resolvable = True
+            context_data = {
+                "browser": item.browser,
+                "profile_name": item.profile_name,
+                "extension_id": item.extension_id,
+                "install_path": str(item.path),
+            }
+
         return AuditFinding(
             category=AuditCategory.BROWSER,
             problem_name=f"{item.browser}: {item.item_type} suspeito",
@@ -2070,7 +2299,31 @@ class AuditService:
             score=item.score,
             evidence=evidence,
             recommendation=recommendation,
+            resolver_key=resolver_key,
+            auto_resolvable=auto_resolvable,
+            context_data=context_data,
         )
+
+    def _resolve_edge_extension_record_from_finding(self, finding: AuditFinding) -> EdgeExtensionRecord | None:
+        """Resolve uma extensao Edge do inventario atual a partir do contexto do achado."""
+        if self._browser_service is None:
+            return None
+
+        extension_id = finding.context_data.get("extension_id", "").strip()
+        profile_name = finding.context_data.get("profile_name", "").strip()
+        install_path = finding.context_data.get("install_path", "").strip().lower()
+        if not extension_id or not profile_name or not install_path:
+            return None
+
+        inventory = self._browser_service.list_edge_extensions()
+        for extension in inventory.extensions:
+            if (
+                extension.extension_id == extension_id
+                and extension.profile_name == profile_name
+                and str(extension.install_path).lower() == install_path
+            ):
+                return extension
+        return None
 
     def _email_item_to_finding(self, item: EmailScanItem) -> AuditFinding:
         severity, status = self._map_risk_to_audit(item.score, item.risk_level, item.classification)

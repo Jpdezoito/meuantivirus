@@ -23,7 +23,8 @@ from app.services.email_account_models import (
 )
 from app.services.email_scan_models import EmailScanError, EmailScanItem, EmailScanReport
 from app.services.file_scanner_service import ScanControl
-from app.utils.logger import log_info
+from app.services.url_threat_service import UrlThreatService
+from app.utils.logger import log_info, log_warning
 
 
 class EmailAccountService:
@@ -64,6 +65,7 @@ class EmailAccountService:
     ) -> None:
         self.logger = logger
         self.heuristic_engine = heuristic_engine
+        self.url_threat_service = UrlThreatService()
         self.runtime_oauth_dir = runtime_data_dir / "email_oauth"
         self.resource_oauth_dir = resource_dir / "app" / "oauth"
         self.runtime_oauth_dir.mkdir(parents=True, exist_ok=True)
@@ -109,10 +111,10 @@ class EmailAccountService:
         return self._analyze_outlook_inbox(max_messages, progress_callback, scan_control)
 
     def _connect_gmail(self) -> EmailAccountStatus:
-        config_file = self.resource_oauth_dir / "gmail_oauth_client.json"
+        config_file = self._resolve_config_file("gmail_oauth_client.json")
         if not config_file.exists():
             raise EmailOAuthConfigurationError(
-                "Configuracao OAuth do Gmail ausente. Crie app/oauth/gmail_oauth_client.json com o client OAuth do Google."
+                "Configuracao OAuth do Gmail ausente. Crie app/oauth/gmail_oauth_client.json com o client OAuth do Google (nao use extensao duplicada .json.json)."
             )
 
         try:
@@ -125,14 +127,20 @@ class EmailAccountService:
             ) from error
 
         token_file = self._token_file(EmailProvider.GMAIL)
-        credentials = None
-        if token_file.exists():
-            credentials = Credentials.from_authorized_user_file(str(token_file), list(self.GMAIL_SCOPES))
+        credentials = self._load_gmail_credentials_for_runtime(token_file, Credentials)
 
         if credentials is None or not credentials.valid:
             if credentials and credentials.expired and credentials.refresh_token:
-                credentials.refresh(GoogleRequest())
+                try:
+                    credentials.refresh(GoogleRequest())
+                except Exception as error:
+                    log_warning(self.logger, f"[Email OAuth] Refresh Gmail falhou; token local sera renovado. | erro={error}")
+                    self._invalidate_gmail_token(token_file, reason=f"refresh_error:{error}")
+                    credentials = None
             else:
+                credentials = None
+
+            if credentials is None:
                 flow = InstalledAppFlow.from_client_secrets_file(str(config_file), scopes=list(self.GMAIL_SCOPES))
                 credentials = flow.run_local_server(port=0, open_browser=True)
             token_file.write_text(credentials.to_json(), encoding="utf-8")
@@ -196,18 +204,21 @@ class EmailAccountService:
         )
 
     def _get_gmail_status(self) -> EmailAccountStatus:
-        config_present = (self.resource_oauth_dir / "gmail_oauth_client.json").exists()
+        config_present = self._resolve_config_file("gmail_oauth_client.json").exists()
         token_file = self._token_file(EmailProvider.GMAIL)
         account_label = ""
+        connected = token_file.exists()
         if token_file.exists():
             try:
                 payload = json.loads(token_file.read_text(encoding="utf-8"))
                 account_label = str(payload.get("account") or "")
+                connected = self._gmail_token_scopes_match(payload)
             except Exception:
                 account_label = ""
+                connected = False
         return EmailAccountStatus(
             provider=EmailProvider.GMAIL,
-            connected=token_file.exists(),
+            connected=connected,
             account_label=account_label,
             config_present=config_present,
             scopes=self.GMAIL_SCOPES,
@@ -262,6 +273,18 @@ class EmailAccountService:
             results=results,
             errors=errors,
         )
+
+    def _resolve_config_file(self, filename: str) -> Path:
+        """Resolve o arquivo de configuracao OAuth aceitando nome legado com extensao duplicada."""
+        canonical = self.resource_oauth_dir / filename
+        if canonical.exists():
+            return canonical
+
+        legacy = self.resource_oauth_dir / f"{filename}.json"
+        if legacy.exists():
+            return legacy
+
+        return canonical
 
     def _analyze_outlook_inbox(
         self,
@@ -405,11 +428,15 @@ class EmailAccountService:
         lower_subject = subject.lower()
         sender_lower = sender.lower()
 
+        suspicious_links = 0
         for link in links:
-            lower_link = link.lower()
-            if any(shortener in lower_link for shortener in ("bit.ly", "tinyurl", "t.co", "is.gd")):
-                score += 20
-                reasons.append("Link encurtado detectado")
+            assessment = self.url_threat_service.assess_url(link)
+            if not assessment.suspicious:
+                continue
+            suspicious_links += 1
+            score += min(assessment.score, 35)
+            reasons.extend(assessment.reasons)
+            if suspicious_links >= 2:
                 break
 
         if self._has_brand_imitation(sender_lower):
@@ -460,13 +487,71 @@ class EmailAccountService:
         if not token_file.exists():
             raise EmailAccountError("Nenhuma conta Gmail conectada. Conecte a conta antes de analisar a caixa online.")
 
-        credentials = Credentials.from_authorized_user_file(str(token_file), list(self.GMAIL_SCOPES))
+        credentials = self._load_gmail_credentials_for_runtime(token_file, Credentials)
+        if credentials is None:
+            raise EmailAccountError(
+                "A conexao Gmail salva localmente ficou invalida porque os escopos OAuth mudaram. Conecte a conta novamente para renovar a autorizacao."
+            )
+
         if credentials.expired and credentials.refresh_token:
-            credentials.refresh(GoogleRequest())
+            try:
+                credentials.refresh(GoogleRequest())
+            except Exception as error:
+                self._invalidate_gmail_token(token_file, reason=f"access_refresh_error:{error}")
+                raise EmailAccountError(
+                    "A conexao Gmail salva localmente ficou invalida durante a renovacao do token. Conecte a conta novamente."
+                ) from error
             token_file.write_text(credentials.to_json(), encoding="utf-8")
         if not credentials.valid or not credentials.token:
             raise EmailAccountError("Token Gmail invalido ou expirado. Reconecte a conta para continuar.")
         return credentials.token
+
+    def _load_gmail_credentials_for_runtime(self, token_file: Path, credentials_cls: type) -> object | None:
+        """Carrega credenciais Gmail somente se o token local ainda for compativel com os scopes atuais."""
+        if not token_file.exists():
+            return None
+
+        try:
+            payload = json.loads(token_file.read_text(encoding="utf-8"))
+        except Exception as error:
+            log_warning(self.logger, f"[Email OAuth] Token Gmail ilegivel; token local sera descartado. | erro={error}")
+            self._invalidate_gmail_token(token_file, reason="invalid_json")
+            return None
+
+        if not self._gmail_token_scopes_match(payload):
+            self._invalidate_gmail_token(token_file, reason="scope_mismatch")
+            return None
+
+        try:
+            return credentials_cls.from_authorized_user_file(str(token_file), list(self.GMAIL_SCOPES))
+        except Exception as error:
+            message = str(error)
+            if "scope has changed" in message.lower():
+                self._invalidate_gmail_token(token_file, reason="google_scope_changed")
+                return None
+            raise
+
+    def _gmail_token_scopes_match(self, payload: dict[str, object]) -> bool:
+        """Valida se o token salvo atende exatamente aos scopes Gmail atualmente exigidos."""
+        raw_scopes = payload.get("scopes") or payload.get("scope") or ()
+        if isinstance(raw_scopes, str):
+            granted = {scope.strip() for scope in raw_scopes.split() if scope.strip()}
+        elif isinstance(raw_scopes, list):
+            granted = {str(scope).strip() for scope in raw_scopes if str(scope).strip()}
+        else:
+            granted = set()
+
+        required = {scope.strip() for scope in self.GMAIL_SCOPES if scope.strip()}
+        return granted == required
+
+    def _invalidate_gmail_token(self, token_file: Path, *, reason: str) -> None:
+        """Remove token Gmail local quando ele nao e mais compativel com a configuracao atual."""
+        try:
+            if token_file.exists():
+                token_file.unlink()
+                log_info(self.logger, f"[Email OAuth] Token Gmail local invalidado. | motivo={reason}")
+        except OSError as error:
+            log_warning(self.logger, f"[Email OAuth] Nao foi possivel remover token Gmail invalido. | motivo={reason} | erro={error}")
 
     def _outlook_access_token(self) -> str:
         try:
@@ -547,7 +632,8 @@ class EmailAccountService:
                 payload = response.read().decode("utf-8")
         except HTTPError as error:
             detail = error.read().decode("utf-8", errors="ignore")
-            raise EmailAccountError(f"Falha HTTP {error.code} ao acessar provedor de e-mail: {detail or error.reason}") from error
+            translated = self._translate_provider_http_error(error.code, detail, fallback_reason=str(error.reason), request_url=url)
+            raise EmailAccountError(translated) from error
         except URLError as error:
             raise EmailAccountError(f"Falha de rede ao acessar provedor de e-mail: {error.reason}") from error
 
@@ -555,6 +641,84 @@ class EmailAccountService:
             return json.loads(payload)
         except json.JSONDecodeError as error:
             raise EmailAccountError("Resposta invalida recebida do provedor de e-mail.") from error
+
+    def _translate_provider_http_error(
+        self,
+        status_code: int,
+        detail: str,
+        *,
+        fallback_reason: str,
+        request_url: str,
+    ) -> str:
+        """Converte erros HTTP de provedores em mensagens claras para a interface."""
+        parsed: dict[str, object] = {}
+        if detail:
+            try:
+                loaded = json.loads(detail)
+                if isinstance(loaded, dict):
+                    parsed = loaded
+            except json.JSONDecodeError:
+                parsed = {}
+
+        if self._is_gmail_api_disabled_error(status_code, parsed, request_url):
+            self._log_provider_http_error(status_code, detail, request_url)
+            return (
+                "A autenticacao Google funcionou, mas a Gmail API esta desabilitada no projeto OAuth configurado.\n\n"
+                "Como corrigir:\n"
+                "1. Abra o projeto do Google Cloud usado no arquivo gmail_oauth_client.json.\n"
+                "2. Ative a Gmail API.\n"
+                "3. Aguarde alguns minutos para a propagacao.\n"
+                "4. Tente conectar a conta novamente."
+            )
+
+        self._log_provider_http_error(status_code, detail, request_url)
+        compact_detail = detail.strip() or fallback_reason
+        return f"Falha HTTP {status_code} ao acessar provedor de e-mail: {compact_detail}"
+
+    def _is_gmail_api_disabled_error(self, status_code: int, payload: dict[str, object], request_url: str) -> bool:
+        if status_code != 403:
+            return False
+        if "gmail.googleapis.com" not in request_url:
+            return False
+
+        error_obj = payload.get("error")
+        if not isinstance(error_obj, dict):
+            return False
+
+        message = str(error_obj.get("message") or "").lower()
+        if "gmail api has not been used" in message or "accessnotconfigured" in message:
+            return True
+
+        errors = error_obj.get("errors") or []
+        if isinstance(errors, list):
+            for item in errors:
+                if not isinstance(item, dict):
+                    continue
+                reason = str(item.get("reason") or "").lower()
+                if reason in {"accessnotconfigured", "service_disabled"}:
+                    return True
+
+        details = error_obj.get("details") or []
+        if isinstance(details, list):
+            for item in details:
+                if not isinstance(item, dict):
+                    continue
+                reason = str(item.get("reason") or "").lower()
+                service = str((item.get("metadata") or {}).get("service") or "").lower() if isinstance(item.get("metadata"), dict) else ""
+                if reason == "service_disabled" or service == "gmail.googleapis.com":
+                    return True
+
+        return False
+
+    def _log_provider_http_error(self, status_code: int, detail: str, request_url: str) -> None:
+        compact = " ".join(detail.split())[:900] if detail else "sem detalhe"
+        log_warning(
+            self.logger,
+            (
+                "[Email OAuth] Erro HTTP do provedor | "
+                f"status={status_code} | url={request_url} | detalhe={compact}"
+            ),
+        )
 
     def _token_file(self, provider: EmailProvider) -> Path:
         return self.runtime_oauth_dir / f"{provider.value}_token.json"

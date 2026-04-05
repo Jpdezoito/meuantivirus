@@ -1,8 +1,10 @@
-"""SentinelaPC Mobile — antivirus para Android usando Flet 0.84+."""
+"""Sentinela Mobile — antivirus para Android usando Flet 0.84+."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import json
 import re
 import threading
 import zipfile
@@ -16,8 +18,11 @@ import flet as ft
 from flet import FilePicker
 
 
-APP_NAME = "SentinelaPC Mobile"
+APP_NAME = "Sentinela Mobile"
 APP_VERSION = "1.2.0"
+MOBILE_LOGO_ASSET = "sentinelamobile.png"
+MOBILE_CONFIG_FILE = Path.home() / ".sentinela_mobile" / "settings.json"
+REAL_TIME_MONITOR_INTERVAL_SECONDS = 6
 
 
 # ── Modelos ────────────────────────────────────────────────────────────────────
@@ -37,6 +42,26 @@ class ScanResult:
     risk_level: RiskLevel
     score: int
     reasons: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class MobileModule:
+    key: str
+    title: str
+    description: str
+
+
+DESKTOP_BASE_MODULES: tuple[MobileModule, ...] = (
+    MobileModule("files", "Arquivos suspeitos", "Varredura heuristica de arquivos locais."),
+    MobileModule("full_scan", "Verificacao completa", "Analise ampla do armazenamento selecionado."),
+    MobileModule("history", "Historico da sessao", "Registro dos eventos e acoes executadas."),
+    MobileModule("startup", "Inicializacao", "Inspecao de inicializacao adaptada para mobile."),
+    MobileModule("processes", "Processos", "Analise de processos ativos dentro do app."),
+    MobileModule("browsers", "Navegadores", "Checagem de artefatos de navegacao exportados."),
+    MobileModule("quarantine", "Quarentena", "Isolamento de itens suspeitos encontrados."),
+    MobileModule("monitoring", "Monitoramento", "Observacao automatica com protecao em tempo real."),
+    MobileModule("real_time", "Protecao em tempo real", "Controle manual para ligar ou desligar o monitor."),
+)
 
 
 # ── Regras de analise ──────────────────────────────────────────────────────────
@@ -233,6 +258,15 @@ async def main(page: ft.Page) -> None:
     _cancel:      list[bool]        = [False]
     _sel_dir:     list[Path | None] = [None]
     _hashes:      dict[str, str]    = {}
+    _desktop_modules: list[MobileModule] = []
+    _module_runtime_status: dict[str, str] = {}
+    _module_cards_column = ft.Column(spacing=8, tight=True)
+    _history_list = ft.ListView(controls=[], spacing=6, height=170)
+    _real_time_protection_enabled: list[bool] = [True]
+    _real_time_monitor_generation: list[int] = [0]
+    _monitor_task_running: list[bool] = [False]
+    _snapshot_state: dict[str, float] = {}
+    _reported_real_time_items: set[str] = set()
 
     # ── Referencias de controles dinâmicos ────────────────────────────────
 
@@ -240,6 +274,203 @@ async def main(page: ft.Page) -> None:
     progress_ring   = ft.ProgressRing(visible=False, color=ACCENT, width=20, height=20)
     progress_bar    = ft.ProgressBar(visible=False, color=ACCENT, bgcolor=CARD, value=0, expand=True)
     progress_lbl    = ft.Text("", size=11, color=TEXT2)
+    protection_state_txt = ft.Text("", size=11, weight=ft.FontWeight.W_600)
+    monitor_state_txt = ft.Text("", size=11, color=TEXT2)
+    module_section_desc = ft.Text("", size=11, color=TEXT2)
+    protection_switch = ft.Switch(value=True, active_color=SUCCESS, inactive_thumb_color="#8ba3bb")
+
+    def _append_history_log(message: str) -> None:
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        _history_list.controls.insert(
+            0,
+            ft.Text(f"[{timestamp}] {message}", size=11, color=TEXT2),
+        )
+        if len(_history_list.controls) > 80:
+            _history_list.controls.pop()
+
+    def _load_mobile_config() -> dict[str, bool]:
+        default = {"real_time_protection_enabled": True}
+        try:
+            if not MOBILE_CONFIG_FILE.exists():
+                return default
+            raw = json.loads(MOBILE_CONFIG_FILE.read_text(encoding="utf-8"))
+            enabled = bool(raw.get("real_time_protection_enabled", True))
+            return {"real_time_protection_enabled": enabled}
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            return default
+
+    def _save_mobile_config() -> None:
+        payload = {"real_time_protection_enabled": _real_time_protection_enabled[0]}
+        MOBILE_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        MOBILE_CONFIG_FILE.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+
+    def sync_mobile_with_desktop_modules() -> list[MobileModule]:
+        """Mantem o conjunto de modulos mobile alinhado ao baseline do desktop."""
+        return list(DESKTOP_BASE_MODULES)
+
+    def load_mobile_modules() -> None:
+        """Carrega os modulos principais e aplica status iniciais para mobile."""
+        _desktop_modules.clear()
+        _desktop_modules.extend(sync_mobile_with_desktop_modules())
+        _module_runtime_status.clear()
+        for module in _desktop_modules:
+            _module_runtime_status[module.key] = "ativo"
+        if not _real_time_protection_enabled[0]:
+            _module_runtime_status["monitoring"] = "desativado"
+            _module_runtime_status["real_time"] = "desativado"
+
+    def _status_color(status: str) -> str:
+        if status == "ativo":
+            return SUCCESS
+        if status == "desativado":
+            return WARNING
+        return TEXT2
+
+    def _render_module_cards() -> None:
+        _module_cards_column.controls.clear()
+        for module in _desktop_modules:
+            runtime_status = _module_runtime_status.get(module.key, "ativo")
+            chip = ft.Container(
+                content=ft.Text(runtime_status.upper(), size=9, weight=ft.FontWeight.W_700, color=_status_color(runtime_status)),
+                border=ft.border.all(1, _status_color(runtime_status)),
+                border_radius=8,
+                padding=ft.padding.symmetric(horizontal=8, vertical=2),
+            )
+            _module_cards_column.controls.append(
+                _card(
+                    ft.Row(
+                        controls=[
+                            ft.Column(
+                                controls=[
+                                    ft.Text(module.title, size=13, color=TEXT1, weight=ft.FontWeight.W_600),
+                                    ft.Text(module.description, size=10, color=TEXT2),
+                                ],
+                                spacing=2,
+                                expand=True,
+                            ),
+                            chip,
+                        ],
+                        spacing=10,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    padding=12,
+                )
+            )
+
+    async def _real_time_monitor_loop(generation: int) -> None:
+        """Loop de monitoramento em tempo real com controle de geracao para evitar duplicacoes."""
+        try:
+            while _real_time_protection_enabled[0] and generation == _real_time_monitor_generation[0]:
+                selected_dir = _sel_dir[0]
+                if selected_dir and selected_dir.exists():
+                    changed_files: list[Path] = []
+                    scanned = 0
+                    for file_path in selected_dir.rglob("*"):
+                        if not file_path.is_file():
+                            continue
+                        scanned += 1
+                        if scanned > 1200:
+                            break
+                        key = str(file_path)
+                        try:
+                            modified = file_path.stat().st_mtime
+                        except OSError:
+                            continue
+                        prev = _snapshot_state.get(key)
+                        if prev is None or modified > prev:
+                            _snapshot_state[key] = modified
+                            changed_files.append(file_path)
+
+                    suspicious_hits = 0
+                    for candidate in changed_files[:20]:
+                        result = scan_file(candidate)
+                        if result.score <= 0:
+                            continue
+                        unique_key = f"{candidate}:{result.score}"
+                        if unique_key in _reported_real_time_items:
+                            continue
+                        _reported_real_time_items.add(unique_key)
+                        suspicious_hits += 1
+                        _results.insert(0, result)
+                        results_list.controls.insert(0, _build_item(result))
+
+                    if suspicious_hits > 0:
+                        val_suspeitos.value = str(len(_results))
+                        _append_history_log(
+                            f"[Monitoramento] {suspicious_hits} item(ns) suspeito(s) detectado(s) automaticamente."
+                        )
+                        status_txt.value = "Monitoramento em tempo real detectou novos riscos."
+                        _module_runtime_status["monitoring"] = "ativo"
+                        _render_module_cards()
+                        page.update()
+
+                await asyncio.sleep(REAL_TIME_MONITOR_INTERVAL_SECONDS)
+        finally:
+            if generation == _real_time_monitor_generation[0]:
+                _monitor_task_running[0] = False
+
+    def update_mobile_protection_ui() -> None:
+        """Sincroniza switch, status textual e estado dos modulos monitorados."""
+        enabled = _real_time_protection_enabled[0]
+        protection_switch.value = enabled
+        if enabled:
+            protection_state_txt.value = "Protecao ativada"
+            protection_state_txt.color = SUCCESS
+            monitor_state_txt.value = "Monitor: ativo"
+            module_section_desc.value = "Modulos alinhados ao desktop e monitoramento automatico ativo."
+            _module_runtime_status["monitoring"] = "ativo"
+            _module_runtime_status["real_time"] = "ativo"
+        else:
+            protection_state_txt.value = "Protecao desativada"
+            protection_state_txt.color = WARNING
+            monitor_state_txt.value = "Monitor: desativado"
+            module_section_desc.value = "Monitoramento automatico pausado por escolha do usuario."
+            _module_runtime_status["monitoring"] = "desativado"
+            _module_runtime_status["real_time"] = "desativado"
+        _render_module_cards()
+
+    def _ensure_monitor_loop() -> None:
+        if not _real_time_protection_enabled[0] or _monitor_task_running[0]:
+            return
+        _monitor_task_running[0] = True
+        generation = _real_time_monitor_generation[0]
+        page.run_task(_real_time_monitor_loop, generation)
+
+    def enable_real_time_protection() -> None:
+        """Ativa a protecao em tempo real e inicia os loops de monitoramento necessarios."""
+        if _real_time_protection_enabled[0]:
+            return
+        _real_time_protection_enabled[0] = True
+        _real_time_monitor_generation[0] += 1
+        _save_mobile_config()
+        update_mobile_protection_ui()
+        _append_history_log("[Protecao] Protecao em tempo real ativada pelo usuario.")
+        _ensure_monitor_loop()
+        page.update()
+
+    def disable_real_time_protection() -> None:
+        """Desativa com seguranca os monitores automaticos de protecao em tempo real."""
+        if not _real_time_protection_enabled[0]:
+            return
+        _real_time_protection_enabled[0] = False
+        _real_time_monitor_generation[0] += 1
+        _monitor_task_running[0] = False
+        _save_mobile_config()
+        update_mobile_protection_ui()
+        _append_history_log("[Protecao] Protecao em tempo real desativada pelo usuario.")
+        page.update()
+
+    def toggle_real_time_protection() -> None:
+        """Alterna manualmente o estado real da protecao e sincroniza UI + monitor."""
+        if _real_time_protection_enabled[0]:
+            disable_real_time_protection()
+        else:
+            enable_real_time_protection()
+
+    config = _load_mobile_config()
+    _real_time_protection_enabled[0] = bool(config.get("real_time_protection_enabled", True))
+    _real_time_monitor_generation[0] = 1
+    load_mobile_modules()
 
     val_analisados  = ft.Text("0", size=26, weight=ft.FontWeight.BOLD, color=ACCENT)
     val_suspeitos   = ft.Text("0", size=26, weight=ft.FontWeight.BOLD, color=DANGER)
@@ -329,6 +560,13 @@ async def main(page: ft.Page) -> None:
         progress_bar.value    = 1
         suffix = "interrompida" if _cancel[0] else "concluida"
         status_txt.value      = f"Verificacao {suffix} — {len(results)} suspeito(s)."
+        _module_runtime_status["files"] = "ativo"
+        _module_runtime_status["full_scan"] = "ativo"
+        _module_runtime_status["history"] = "ativo"
+        _render_module_cards()
+        _append_history_log(
+            f"[Scan] Verificacao {suffix}. Arquivos analisados: {total}. Suspeitos: {len(results)}."
+        )
         scan_btn.visible      = True
         full_scan_btn.visible = True
         stop_btn.visible      = False
@@ -346,6 +584,7 @@ async def main(page: ft.Page) -> None:
         progress_bar.value    = 0
         progress_lbl.value    = ""
         status_txt.value      = "Verificando..."
+        _append_history_log("[Scan] Nova verificacao iniciada manualmente.")
         scan_btn.visible      = False
         full_scan_btn.visible = False
         stop_btn.visible      = True
@@ -366,16 +605,19 @@ async def main(page: ft.Page) -> None:
             return
         _sel_dir[0]   = Path.home()
         dir_txt.value = "Verificacao completa"
+        _append_history_log("[Scan] Verificacao completa iniciada com escopo padrao do dispositivo.")
         _do_start_scan()
 
     def _stop_scan() -> None:
         _cancel[0] = True
         status_txt.value = "Parando verificacao..."
+        _append_history_log("[Scan] Solicitacao de parada recebida.")
         page.update()
 
     scan_btn.on_click      = _start_scan
     full_scan_btn.on_click = _start_full_scan
     stop_btn.on_click      = _stop_scan
+    protection_switch.on_change = lambda _event: toggle_real_time_protection()
 
     # ── Seletor de pasta ──────────────────────────────────────────────────
 
@@ -387,6 +629,13 @@ async def main(page: ft.Page) -> None:
         if path:
             _sel_dir[0] = Path(path)
             dir_txt.value = path
+            _module_runtime_status["startup"] = "ativo"
+            _module_runtime_status["processes"] = "ativo"
+            _module_runtime_status["browsers"] = "ativo"
+            _module_runtime_status["quarantine"] = "ativo"
+            _render_module_cards()
+            _append_history_log(f"[Sessao] Pasta selecionada para monitoramento: {path}")
+            _ensure_monitor_loop()
         page.update()
 
     # ── Layout ────────────────────────────────────────────────────────────
@@ -394,40 +643,67 @@ async def main(page: ft.Page) -> None:
     header = ft.Container(
         content=ft.Row(
             controls=[
-                ft.Icon(ft.Icons.SECURITY_ROUNDED, color=ACCENT, size=28),
                 ft.Container(
                     content=ft.Image(
-                        src="icon.png",
-                        width=30,
-                        height=30,
+                        src=MOBILE_LOGO_ASSET,
+                        width=112,
+                        height=112,
                     ),
-                    border_radius=8,
+                    width=104,
+                    height=104,
+                    alignment=ft.Alignment(0, 0),
+                    border_radius=24,
                     clip_behavior=ft.ClipBehavior.HARD_EDGE,
                 ),
                 ft.Column(
                     controls=[
-                        ft.Text("SentinelaPC", size=17, weight=ft.FontWeight.BOLD, color=TEXT1),
-                        ft.Text(f"Protecao mobile  v{APP_VERSION}", size=11, color=TEXT2),
+                        ft.Text("Sentinela Mobile", size=19, weight=ft.FontWeight.BOLD, color=TEXT1),
+                        ft.Text(f"Protecao mobile v{APP_VERSION}", size=12, color=TEXT2),
+                        monitor_state_txt,
                     ],
-                    spacing=0, tight=True,
+                    spacing=4,
+                    tight=True,
+                    alignment=ft.MainAxisAlignment.CENTER,
+                    expand=True,
+                ),
+                _card(
+                    ft.Column(
+                        controls=[
+                            protection_state_txt,
+                            ft.Row(
+                                controls=[
+                                    ft.Text("Tempo real", size=11, color=TEXT2),
+                                    protection_switch,
+                                ],
+                                spacing=8,
+                                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                            ),
+                        ],
+                        spacing=4,
+                        tight=True,
+                    ),
+                    padding=10,
                 ),
             ],
-            spacing=12,
+            spacing=20,
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         ),
         bgcolor=CARD,
-        padding=ft.padding.symmetric(horizontal=20, vertical=14),
+        padding=ft.padding.symmetric(horizontal=20, vertical=22),
     )
 
     folder_row_controls: list[ft.Control] = [
         cast(ft.Control, dir_txt),
         cast(
             ft.Control,
-            ft.IconButton(
-                ft.Icons.FOLDER_OPEN_ROUNDED,
-                icon_color=ACCENT,
+            ft.Container(
+                content=ft.Icon(ft.Icons.FOLDER_OPEN_ROUNDED, color=ACCENT),
                 tooltip="Selecionar pasta",
-                on_click=lambda: page.run_task(_pick_directory),
+                ink=True,
+                padding=8,
+                border_radius=10,
+                on_click=lambda _event: page.run_task(_pick_directory),
             ),
         ),
     ]
@@ -449,6 +725,31 @@ async def main(page: ft.Page) -> None:
             spacing=8,
             tight=True,
         )
+    )
+
+    modules_card = _card(
+        ft.Column(
+            controls=[
+                _label("MODULOS PRINCIPAIS (BASE DESKTOP)"),
+                module_section_desc,
+                _module_cards_column,
+            ],
+            spacing=8,
+            tight=True,
+        ),
+        padding=14,
+    )
+
+    history_card = _card(
+        ft.Column(
+            controls=[
+                _label("HISTORICO DA SESSAO"),
+                _history_list,
+            ],
+            spacing=8,
+            tight=True,
+        ),
+        padding=14,
     )
 
     metrics_row = ft.Row(
@@ -491,6 +792,8 @@ async def main(page: ft.Page) -> None:
     body = ft.Column(
         controls=[
             ft.Container(height=12),
+            ft.Container(modules_card,   padding=ft.padding.symmetric(horizontal=16)),
+            ft.Container(height=10),
             ft.Container(folder_card,    padding=ft.padding.symmetric(horizontal=16)),
             ft.Container(height=10),
             ft.Container(metrics_row,    padding=ft.padding.symmetric(horizontal=16)),
@@ -501,6 +804,8 @@ async def main(page: ft.Page) -> None:
             ),
             ft.Container(height=10),
             ft.Container(progress_card,  padding=ft.padding.symmetric(horizontal=16)),
+            ft.Container(height=10),
+            ft.Container(history_card,   padding=ft.padding.symmetric(horizontal=16)),
             ft.Container(height=14),
             ft.Container(
                 ft.Text("ITENS SUSPEITOS", size=11, color=TEXT2, weight=ft.FontWeight.W_600),
@@ -522,6 +827,15 @@ async def main(page: ft.Page) -> None:
             expand=True,
         )
     )
+
+    update_mobile_protection_ui()
+    _append_history_log("[Sessao] Modulos desktop adaptados carregados no mobile.")
+    if _real_time_protection_enabled[0]:
+        _append_history_log("[Protecao] Protecao em tempo real restaurada como ativada.")
+        _ensure_monitor_loop()
+    else:
+        _append_history_log("[Protecao] Protecao em tempo real restaurada como desativada.")
+    page.update()
 
 
 if __name__ == "__main__":

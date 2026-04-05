@@ -1,0 +1,14 @@
+{
+  "blocklist_hosts": [
+    "goog1e-login.com",
+    "micr0soft-auth.com",
+    "secure-paypal-checkout.com"
+  ],
+  "allowlist_hosts": [
+    "apple.com",
+    "google.com",
+    "microsoft.com",
+    "paypal.com"
+  ],
+  "extra_brand_legit_domains": {}
+}

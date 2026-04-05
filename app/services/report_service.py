@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from html import escape
 from pathlib import Path
 import logging
@@ -12,9 +13,14 @@ from app.services.report_models import GeneratedReportFiles, SessionReportData
 class ReportService:
     """Concentra a criacao, formatacao e gravacao dos relatorios do sistema."""
 
-    def __init__(self, reports_dir: Path, logger: logging.Logger) -> None:
+    def __init__(self, reports_dir: Path, logger: logging.Logger, resource_dir: Path | None = None) -> None:
         self.reports_dir = reports_dir
         self.logger = logger
+        self.report_logo_path = (
+            resource_dir / "app" / "assets" / "branding" / "logo-report-192.png"
+            if resource_dir is not None
+            else None
+        )
 
     def generate_session_report(self, session_data: SessionReportData) -> GeneratedReportFiles:
         """Gera arquivos TXT e HTML com base nos resultados reunidos na sessao."""
@@ -67,6 +73,12 @@ class ReportService:
             f"<li>{escape(action)}</li>" for action in self._build_suggested_actions(session_data)
         )
         quarantine_html = "".join(self._build_html_quarantine_items(session_data))
+        logo_data_uri = self._build_report_logo_data_uri()
+        logo_html = (
+            f"<img class=\"brand-logo\" src=\"{logo_data_uri}\" alt=\"Logo SentinelaPC\" />"
+            if logo_data_uri
+            else ""
+        )
 
         return f"""<!DOCTYPE html>
 <html lang=\"pt-BR\">
@@ -140,11 +152,24 @@ class ReportService:
         .muted {{
             color: #61758a;
         }}
+        .brand {{
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }}
+        .brand-logo {{
+            width: 56px;
+            height: 56px;
+            border-radius: 12px;
+            object-fit: cover;
+            border: 1px solid #d7e2ec;
+            background: #f8fafc;
+        }}
     </style>
 </head>
 <body>
     <div class=\"page\">
-        <h1>SentinelaPC - Relatorio da sessao</h1>
+        <div class=\"brand\">{logo_html}<h1>SentinelaPC - Relatorio da sessao</h1></div>
         <p class=\"muted\">Gerado em {escape(session_data.generated_at.strftime('%d/%m/%Y %H:%M:%S'))}</p>
 
         <div class=\"summary\">
@@ -172,6 +197,19 @@ class ReportService:
 </body>
 </html>
 """
+
+    def _build_report_logo_data_uri(self) -> str:
+        """Retorna o logo do relatorio em data URI para manter o HTML portavel."""
+        if self.report_logo_path is None or not self.report_logo_path.exists():
+            return ""
+
+        try:
+            logo_bytes = self.report_logo_path.read_bytes()
+        except OSError:
+            return ""
+
+        encoded = base64.b64encode(logo_bytes).decode("ascii")
+        return f"data:image/png;base64,{encoded}"
 
     def _build_txt_sections(self, session_data: SessionReportData) -> list[str]:
         """Gera os blocos textuais para cada tipo de verificacao executada."""
@@ -310,10 +348,18 @@ class ReportService:
         ]
         if report.results:
             for result in report.results:
+                verification_details = ""
+                if result.deep_scan_performed:
+                    verification_details = f" | verificacao_profunda={result.deep_scan_summary}"
+                    if result.trusted_publisher:
+                        verification_details += f" | editora={result.trusted_publisher}"
                 lines.append(
                     (
                         f"- Arquivo: {result.path} | score={result.heuristic_score} | "
-                        f"classe={result.final_classification.value} | risco={result.initial_risk_level.value} | motivo={result.alert_reason}"
+                        f"classe={result.final_classification.value} | risco={result.initial_risk_level.value} | "
+                        f"categoria={result.threat_category} | modulo={result.analysis_module} | "
+                        f"acao={result.recommended_action} | motivo={result.alert_reason}"
+                        f"{verification_details}"
                     )
                 )
         else:
@@ -340,7 +386,8 @@ class ReportService:
                     (
                         f"- Processo: {result.name} (PID {result.pid}) | exe={executable_path} | "
                         f"score={result.heuristic_score} | classe={result.final_classification.value} | "
-                        f"risco={result.initial_risk_level.value} | motivo={result.alert_reason}"
+                        f"risco={result.initial_risk_level.value} | categoria={result.threat_category} | "
+                        f"modulo={result.analysis_module} | acao={result.recommended_action} | motivo={result.alert_reason}"
                     )
                 )
         else:
@@ -386,13 +433,16 @@ class ReportService:
                 f"<td>{result.heuristic_score}</td>"
                 f"<td>{escape(result.final_classification.value)}</td>"
                 f"<td>{escape(result.initial_risk_level.value)}</td>"
+                f"<td>{escape(result.threat_category)}</td>"
+                f"<td>{escape(result.analysis_module)}</td>"
+                f"<td>{escape(result.recommended_action)}</td>"
                 f"<td>{escape(result.alert_reason)}</td>"
                 "</tr>"
             )
             for result in report.results
         )
         if not rows:
-            rows = "<tr><td colspan=\"5\" class=\"muted\">Nenhum arquivo suspeito encontrado.</td></tr>"
+            rows = "<tr><td colspan=\"8\" class=\"muted\">Nenhum arquivo suspeito encontrado.</td></tr>"
 
         return [
             (
@@ -400,7 +450,7 @@ class ReportService:
                 "<h3>Arquivos</h3>"
                 f"<p class=\"muted\">Analise: {escape(report.scan_label.lower())} em {escape(str(report.target_directory))}<br>"
                 f"Itens analisados: {report.scanned_files} | Suspeitos: {report.flagged_files}</p>"
-                "<table><thead><tr><th>Arquivo</th><th>Score</th><th>Classe</th><th>Risco</th><th>Motivo</th></tr></thead>"
+                "<table><thead><tr><th>Arquivo</th><th>Score</th><th>Classe</th><th>Risco</th><th>Categoria</th><th>Modulo</th><th>Acao</th><th>Motivo</th></tr></thead>"
                 f"<tbody>{rows}</tbody></table>"
                 "</section>"
             )
@@ -420,20 +470,23 @@ class ReportService:
                 f"<td>{result.heuristic_score}</td>"
                 f"<td>{escape(result.final_classification.value)}</td>"
                 f"<td>{escape(result.initial_risk_level.value)}</td>"
+                f"<td>{escape(result.threat_category)}</td>"
+                f"<td>{escape(result.analysis_module)}</td>"
+                f"<td>{escape(result.recommended_action)}</td>"
                 f"<td>{escape(result.alert_reason)}</td>"
                 "</tr>"
             )
             for result in report.results
         )
         if not rows:
-            rows = "<tr><td colspan=\"6\" class=\"muted\">Nenhum processo suspeito encontrado.</td></tr>"
+            rows = "<tr><td colspan=\"9\" class=\"muted\">Nenhum processo suspeito encontrado.</td></tr>"
 
         return [
             (
                 "<section class=\"section\">"
                 "<h3>Processos</h3>"
                 f"<p class=\"muted\">Analise: processos ativos<br>Itens analisados: {report.inspected_processes} | Suspeitos: {report.suspicious_processes}</p>"
-                "<table><thead><tr><th>Processo</th><th>PID</th><th>Score</th><th>Classe</th><th>Risco</th><th>Motivo</th></tr></thead>"
+                "<table><thead><tr><th>Processo</th><th>PID</th><th>Score</th><th>Classe</th><th>Risco</th><th>Categoria</th><th>Modulo</th><th>Acao</th><th>Motivo</th></tr></thead>"
                 f"<tbody>{rows}</tbody></table>"
                 "</section>"
             )

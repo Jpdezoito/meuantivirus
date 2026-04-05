@@ -22,6 +22,13 @@ class FileScanResult:
     initial_risk_level: RiskLevel
     final_classification: ThreatClassification = ThreatClassification.SUSPICIOUS
     classification_reasons: list[str] = field(default_factory=list)
+    deep_scan_performed: bool = False
+    deep_scan_summary: str = ""
+    trusted_publisher: str | None = None
+    recommended_action: str = "monitorar_e_logar"
+    threat_category: str = "desconhecido"
+    analysis_module: str = "file_scanner"
+    detected_signals: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

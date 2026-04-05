@@ -14,6 +14,8 @@ from app.core.heuristics import HeuristicEngine
 from app.core.risk import ThreatClassification
 from app.services.file_scanner_service import ScanControl
 from app.services.process_scan_models import ProcessScanError, ProcessScanReport, ProcessScanResult
+from app.services.analyzer_behavior import ProcessBehaviorAnalyzer
+from app.services.risk_engine import RiskEngine
 from app.utils.logger import log_info, log_security_event, log_warning
 
 
@@ -43,6 +45,8 @@ class ProcessMonitorService:
     def __init__(self, logger: logging.Logger, heuristic_engine: HeuristicEngine) -> None:
         self.logger = logger
         self.heuristic_engine = heuristic_engine
+        self.behavior_analyzer = ProcessBehaviorAnalyzer()
+        self.risk_engine = RiskEngine()
 
     def scan_processes(
         self,
@@ -243,7 +247,20 @@ class ProcessMonitorService:
             signature_publisher=signature_publisher,
         )
 
-        if evaluation.classification == ThreatClassification.TRUSTED:
+        behavior_signals = self.behavior_analyzer.analyze_process(
+            process_name=process_name,
+            executable_path=executable_path,
+            cpu_samples=cpu_samples,
+            memory_samples=memory_samples,
+            command_line=self._safe_get_cmdline(tracked_process["process"]),
+            parent_name=self._safe_get_parent_name(tracked_process["process"]),
+        )
+        assessment = self.risk_engine.assess(base_score=evaluation.score, signals=behavior_signals)
+        combined_reasons = list(dict.fromkeys([*evaluation.reasons, *[signal.reason for signal in behavior_signals]]))
+        combined_reasons.append(f"Acao recomendada: {assessment.recommended_action.value}")
+        final_evaluation = self.heuristic_engine.build_custom_evaluation(assessment.score, combined_reasons)
+
+        if final_evaluation.classification == ThreatClassification.TRUSTED:
             return None
 
         return ProcessScanResult(
@@ -252,12 +269,16 @@ class ProcessMonitorService:
             executable_path=executable_path,
             cpu_usage_percent=cpu_average,
             memory_usage_percent=memory_average,
-            heuristic_score=evaluation.score,
-            heuristic_summary=evaluation.explanation,
-            alert_reason=evaluation.explanation,
-            initial_risk_level=evaluation.risk_level,
-            final_classification=evaluation.classification,
-            classification_reasons=list(evaluation.reasons),
+            heuristic_score=final_evaluation.score,
+            heuristic_summary=final_evaluation.explanation,
+            alert_reason=final_evaluation.explanation,
+            initial_risk_level=final_evaluation.risk_level,
+            final_classification=final_evaluation.classification,
+            classification_reasons=list(final_evaluation.reasons),
+            recommended_action=assessment.recommended_action.value,
+            threat_category=self._extract_process_category(combined_reasons),
+            analysis_module="process_monitor",
+            detected_signals=list(combined_reasons),
         )
 
     def _has_strange_name(self, process_name: str) -> bool:
@@ -317,6 +338,35 @@ class ProcessMonitorService:
             )
         )
         log_warning(self.logger, f"Processo {process_name} ({pid}) | {message}")
+
+    def _safe_get_cmdline(self, process: psutil.Process) -> str:
+        """Le cmdline do processo sem interromper o fluxo quando houver bloqueio."""
+        try:
+            return " ".join(process.cmdline())
+        except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess, OSError):
+            return ""
+
+    def _safe_get_parent_name(self, process: psutil.Process) -> str:
+        """Retorna nome do processo pai quando disponivel."""
+        try:
+            parent = process.parent()
+            if parent is None:
+                return ""
+            return parent.name() or ""
+        except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess, OSError):
+            return ""
+
+    def _extract_process_category(self, reasons: list[str]) -> str:
+        lowered = " | ".join(reasons).lower()
+        if "ransom" in lowered or "wiper" in lowered:
+            return "ransomware/wiper"
+        if "fileless" in lowered or "encodedcommand" in lowered:
+            return "fileless"
+        if "cryptojacking" in lowered or "cpu elevada" in lowered:
+            return "cryptojacker"
+        if "trojan" in lowered or "dropper" in lowered:
+            return "trojan"
+        return "comportamento_anomalo"
 
     def _emit_progress(
         self,

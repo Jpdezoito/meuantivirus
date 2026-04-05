@@ -23,6 +23,10 @@ class ProcessScanResult:
     initial_risk_level: RiskLevel
     final_classification: ThreatClassification = ThreatClassification.SUSPICIOUS
     classification_reasons: list[str] = field(default_factory=list)
+    recommended_action: str = "monitorar_e_logar"
+    threat_category: str = "desconhecido"
+    analysis_module: str = "process_monitor"
+    detected_signals: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

@@ -59,7 +59,7 @@ Sem ativar o ambiente:
 Instale primeiro as dependencias de build e depois rode o comando abaixo na raiz do projeto.
 
 ```powershell
-python -m PyInstaller --noconfirm --clean --windowed --name SentinelaPC --paths . --add-data "app;app" main.py
+python -m PyInstaller --noconfirm --clean --windowed --name SentinelaPC --icon "app\assets\branding\logo-installer.ico" --paths . --add-data "app;app" main.py
 ```
 
 Observacao importante:
@@ -71,7 +71,7 @@ Observacao importante:
 Com ambiente virtual local:
 
 ```powershell
-.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --windowed --name SentinelaPC --paths . --add-data "app;app" main.py
+.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --windowed --name SentinelaPC --icon "app\assets\branding\logo-installer.ico" --paths . --add-data "app;app" main.py
 ```
 
 Script pronto alternativo:

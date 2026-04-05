@@ -33,6 +33,7 @@ OutputBaseFilename=SentinelaPC-Setup-{#MyAppVersion}
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=..\app\assets\branding\logo-installer.ico
 
 ; Instalar em 64 bits quando o sistema suportar.
 ArchitecturesAllowed=x64compatible

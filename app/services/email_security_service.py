@@ -9,11 +9,13 @@ import logging
 from pathlib import Path
 import re
 import time
+from urllib.parse import urlparse
 
 from app.core.heuristics import HeuristicEngine
 from app.core.risk import ThreatClassification
 from app.services.email_scan_models import EmailScanError, EmailScanItem, EmailScanReport
 from app.services.file_scanner_service import ScanControl
+from app.services.url_threat_service import UrlThreatService
 from app.utils.logger import log_info
 
 
@@ -39,6 +41,11 @@ class EmailSecurityService:
     def __init__(self, logger: logging.Logger, heuristic_engine: HeuristicEngine) -> None:
         self.logger = logger
         self.heuristic_engine = heuristic_engine
+        self.url_threat_service = UrlThreatService()
+
+    def configure_data_dir(self, data_dir: Path | None) -> None:
+        """Permite carregar regras locais de URL guard apos bootstrap da UI."""
+        self.url_threat_service = UrlThreatService(data_dir=data_dir)
 
     def analyze_email_sources(
         self,
@@ -203,12 +210,29 @@ class EmailSecurityService:
         lower_subject = subject.lower()
         sender_lower = sender.lower()
 
+        suspicious_links = 0
+        suspicious_domains: set[str] = set()
         for link in links:
-            lower_link = link.lower()
-            if any(shortener in lower_link for shortener in ("bit.ly", "tinyurl", "t.co", "is.gd")):
-                score += 20
-                reasons.append("Link encurtado detectado")
+            assessment = self.url_threat_service.assess_url(link)
+            if not assessment.suspicious:
+                continue
+            suspicious_links += 1
+            host = (urlparse(link).hostname or "").lower()
+            if host:
+                suspicious_domains.add(host)
+            score += min(assessment.score, 35)
+            reasons.extend(assessment.reasons)
+            if suspicious_links >= 2:
                 break
+
+        credential_score, credential_reasons = self._detect_credential_harvest_pattern(
+            subject=subject,
+            body=body,
+            suspicious_domains=suspicious_domains,
+            suspicious_links=suspicious_links,
+        )
+        score += credential_score
+        reasons.extend(credential_reasons)
 
         if self._has_brand_imitation(sender_lower):
             score += 35
@@ -232,6 +256,47 @@ class EmailSecurityService:
         if any(re.search(r"\.(pdf|doc|jpg|png)\.(exe|scr|bat|cmd)$", name, re.IGNORECASE) for name in attachments):
             score += 30
             reasons.append("Anexo com nome enganoso de dupla extensao")
+
+        dedup_reasons = list(dict.fromkeys(reasons))
+        return min(score, 100), dedup_reasons
+
+    def _detect_credential_harvest_pattern(
+        self,
+        *,
+        subject: str,
+        body: str,
+        suspicious_domains: set[str],
+        suspicious_links: int,
+    ) -> tuple[int, list[str]]:
+        joined = f"{subject} {body}".lower()
+        credential_terms = (
+            "login",
+            "signin",
+            "senha",
+            "password",
+            "codigo",
+            "2fa",
+            "verifique sua conta",
+            "confirmar conta",
+            "acesso bloqueado",
+        )
+        brand_mentions = sum(1 for brand in self.BRAND_KEYWORDS if brand in joined)
+        cred_hits = sum(1 for term in credential_terms if term in joined)
+
+        reasons: list[str] = []
+        score = 0
+
+        if suspicious_links >= 1 and cred_hits >= 2:
+            score += 22
+            reasons.append("Padrao de phishing para coleta de credencial detectado")
+
+        if len(suspicious_domains) >= 2:
+            score += 12
+            reasons.append("Campanha com multiplos dominios suspeitos no mesmo e-mail")
+
+        if brand_mentions >= 1 and cred_hits >= 2 and suspicious_links >= 1:
+            score += 18
+            reasons.append("Combinacao de marca + urgencia + login suspeito")
 
         return score, reasons
 

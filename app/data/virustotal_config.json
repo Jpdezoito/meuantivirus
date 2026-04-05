@@ -1,0 +1,8 @@
+{
+  "api_key": "d31af77612db04249056d9ffc49fecd38fdcaa6e4fcbadcc01331a6ed5dfaa6d",
+  "notes": [
+    "Obtenha uma chave gratuita em https://www.virustotal.com/gui/home/upload",
+    "Chaves gratuitas têm limite de ~600 requisições por dia",
+    "Para uso em produção, considere uma chave paga"
+  ]
+}

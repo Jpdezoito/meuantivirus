@@ -2,22 +2,28 @@
 
 from __future__ import annotations
 
+import json
 import ctypes
+import re
 import subprocess
 import sys
+import queue
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
-from PySide6.QtCore import QThread, QTimer
+from PySide6.QtCore import Qt, QThread, QTimer
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
+    QScrollArea,
     QStackedWidget,
     QStatusBar,
     QVBoxLayout,
@@ -32,6 +38,7 @@ from app.data.action_event_models import ActionEventRecordInput
 from app.data.action_event_repository import ActionEventRepository
 from app.services.browser_scan_models import BrowserScanReport
 from app.services.browser_security_service import BrowserSecurityService
+from app.services.edge_extension_models import EdgeExtensionActionResult, EdgeExtensionRecord
 from app.services.audit_service import AuditService
 from app.services.audit_models import AuditReport, AuditStatus
 from app.services.diagnostics_models import SystemDiagnosticsReport
@@ -49,12 +56,23 @@ from app.services.report_models import SessionReportData
 from app.services.report_service import ReportService
 from app.services.startup_inspector_service import StartupInspectorService
 from app.services.startup_scan_models import StartupScanReport
+from app.core.risk import RiskLevel
+from app.services.network_intrusion_models import NetworkIntrusionAlert
+from app.services.network_intrusion_monitor import NetworkIntrusionMonitorService
+from app.services.pre_execution_models import PreExecutionAlert
+from app.services.pre_execution_monitor import PreExecutionMonitorService
+from app.services.ransomware_behavior_models import RansomwareBehaviorAlert
+from app.services.ransomware_behavior_monitor import RansomwareBehaviorMonitorService
+from app.services.usb_guard_models import UsbSecurityAlert
+from app.services.usb_guard_monitor import UsbGuardMonitorService
 from app.ui.navigation import SidebarNavigation
 from app.ui.pages import DashboardPage, HistoryPage, OperationPage, QuarantinePage, ReportsPage
 from app.ui.pages import AuditPage
+from app.ui.panels import HeaderPanel
 from app.ui.action_policy import ActionPolicy, ActionSeverity, build_action_policy
 from app.ui.browser_suspicious_dialog import BrowserSuspiciousItemsDialog
 from app.ui.confirmation_dialogs import AdminPermissionDialog, ConfirmActionDialog
+from app.ui.edge_extensions_dialog import EdgeExtensionsDialog
 from app.ui.quarantine_dialogs import (
     ProcessQuarantineSelectionDialog,
     QuarantineSelectionDialog,
@@ -80,8 +98,14 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.context = context
         self.file_scanner = FileScannerService(context.logger, context.heuristic_engine)
-        self.browser_security_service = BrowserSecurityService(context.logger, context.heuristic_engine)
+        self.browser_security_service = BrowserSecurityService(
+            context.logger,
+            context.heuristic_engine,
+            data_dir=context.paths.data_dir,
+            quarantine_dir=context.paths.quarantine_dir,
+        )
         self.email_security_service = EmailSecurityService(context.logger, context.heuristic_engine)
+        self.email_security_service.configure_data_dir(context.paths.data_dir)
         self.email_account_service = EmailAccountService(
             context.logger,
             context.heuristic_engine,
@@ -102,7 +126,7 @@ class MainWindow(QMainWindow):
             context.paths.database_file,
             context.logger,
         )
-        self.report_service = ReportService(context.paths.reports_dir, context.logger)
+        self.report_service = ReportService(context.paths.reports_dir, context.logger, context.paths.resource_dir)
         self.history_repository = HistoryRepository(context.paths.database_file)
         self.action_event_repository = ActionEventRepository(context.paths.database_file)
 
@@ -130,6 +154,7 @@ class MainWindow(QMainWindow):
         self.last_email_scan_report: EmailScanReport | None = None
         # Adicionado: ultimo relatorio de auditoria avancada gerado na sessao.
         self.last_audit_report: AuditReport | None = None
+        self._edge_extensions_dialog: EdgeExtensionsDialog | None = None
         self.session_quarantine_items: list = []
         self.executed_scan_types: list[str] = []
         self._active_operation_page_id = "dashboard"
@@ -145,6 +170,10 @@ class MainWindow(QMainWindow):
         self._active_email_scan_summary = ""
         self._active_email_scan_policy: ActionPolicy | None = None
         self._connected_email_provider: EmailProvider | None = None
+        self._manual_email_access_file = self.context.paths.data_dir / "manual_email_access.json"
+        self._manual_email_address = self._load_manual_email_address()
+        self._runtime_preferences_file = self.context.paths.data_dir / "runtime_preferences.json"
+        self._real_time_protection_enabled = self._load_real_time_protection_preference()
         # Adicionado: estado da auditoria avancada (sem pausa; apenas cancelamento).
         self._is_audit_running = False
         self._current_file_scan_analyzed = 0
@@ -157,7 +186,55 @@ class MainWindow(QMainWindow):
         self._visual_progress_paused = False
 
         self.setWindowTitle(f"{APP_NAME} {APP_VERSION}")
-        self.resize(1460, 900)
+        self.resize(1180, 720)
+        # Monitor de pre-execucao
+        self._pre_exec_alert_queue: queue.Queue[PreExecutionAlert] = queue.Queue()
+        self._pre_exec_alert_count: int = 0
+        self._pre_exec_monitor = PreExecutionMonitorService(
+            self.context.logger,
+            data_dir=self.context.paths.data_dir,
+            alert_callback=self._pre_exec_alert_queue.put,
+        )
+        self._pre_exec_poll_timer = QTimer(self)
+        self._pre_exec_poll_timer.setInterval(500)
+        self._pre_exec_poll_timer.timeout.connect(self._poll_pre_exec_alerts)
+
+        # Monitor de intrusao em rede
+        self._network_alert_queue: queue.Queue[NetworkIntrusionAlert] = queue.Queue()
+        self._network_alert_count: int = 0
+        self._network_monitor = NetworkIntrusionMonitorService(
+            self.context.logger,
+            data_dir=self.context.paths.data_dir,
+            alert_callback=self._network_alert_queue.put,
+        )
+        self._network_poll_timer = QTimer(self)
+        self._network_poll_timer.setInterval(900)
+        self._network_poll_timer.timeout.connect(self._poll_network_alerts)
+
+        # Monitor anti-ransomware/wiper (atividade massiva em arquivos)
+        self._ransom_alert_queue: queue.Queue[RansomwareBehaviorAlert] = queue.Queue()
+        self._ransom_alert_count: int = 0
+        self._ransom_monitor = RansomwareBehaviorMonitorService(
+            self.context.logger,
+            alert_callback=self._ransom_alert_queue.put,
+        )
+        self._ransom_poll_timer = QTimer(self)
+        self._ransom_poll_timer.setInterval(1100)
+        self._ransom_poll_timer.timeout.connect(self._poll_ransom_alerts)
+
+        # Monitor de BadUSB/HID injection
+        self._usb_alert_queue: queue.Queue[UsbSecurityAlert] = queue.Queue()
+        self._usb_alert_count: int = 0
+        self._usb_guard_monitor = UsbGuardMonitorService(
+            self.context.logger,
+            data_dir=self.context.paths.data_dir,
+            alert_callback=self._usb_alert_queue.put,
+        )
+        self._usb_poll_timer = QTimer(self)
+        self._usb_poll_timer.setInterval(1200)
+        self._usb_poll_timer.timeout.connect(self._poll_usb_alerts)
+
+        self.setMinimumSize(860, 620)
 
         self._build_pages()
         self._build_ui()
@@ -172,6 +249,7 @@ class MainWindow(QMainWindow):
         self._set_email_scan_control_actions(False)
         # Adicionado: inicializa controles da auditoria avancada.
         self._set_audit_control_actions(False)
+        self.update_protection_ui_state()
 
     def _build_pages(self) -> None:
         """Instancia as paginas especializadas usadas pela area central da interface."""
@@ -183,6 +261,7 @@ class MainWindow(QMainWindow):
             [
                 ("quick_scan", "Verificar arquivos suspeitos"),
                 ("full_scan", "Verificacao completa"),
+                ("resolve_files", "Resolver problemas"),
                 ("pause_scan", "Pausar / retomar scan"),
                 ("stop_scan", "Parar scan"),
                 ("quarantine_file", "Mandar pra quarentena"),
@@ -194,6 +273,7 @@ class MainWindow(QMainWindow):
             "Veja o resultado da leitura dos processos ativos com foco em consumo e sinais operacionais suspeitos.",
             [
                 ("process_scan", "Verificar processos"),
+                ("resolve_processes", "Resolver problemas"),
                 ("pause_process_scan", "Pausar / retomar scan"),
                 ("stop_process_scan", "Parar scan"),
                 ("quarantine_process", "Mandar pra quarentena"),
@@ -205,6 +285,7 @@ class MainWindow(QMainWindow):
             "Acompanhe programas e itens configurados para iniciar com o Windows, com leitura desacoplada e segura.",
             [
                 ("startup_scan", "Verificar inicializacao"),
+                ("resolve_startup", "Resolver problemas"),
                 ("pause_startup_scan", "Pausar / retomar scan"),
                 ("stop_startup_scan", "Parar scan"),
                 ("quarantine_startup", "Mandar pra quarentena"),
@@ -216,6 +297,8 @@ class MainWindow(QMainWindow):
             "Analise local de executaveis, extensoes, sinais de hijack e downloads perigosos sem acessar dados privados.",
             [
                 ("browser_scan", "Analisar navegadores"),
+                ("resolve_browsers", "Resolver problemas"),
+                ("browser_view_extensions", "Ver extensoes Edge"),
                 ("browser_view_suspicious", "Ver itens suspeitos"),
                 ("pause_browser_scan", "Pausar / retomar scan"),
                 ("stop_browser_scan", "Parar scan"),
@@ -224,12 +307,14 @@ class MainWindow(QMainWindow):
         self.emails_page = OperationPage(
             "Protecao de mensagens",
             "E-mails",
-            "Conecte Gmail ou Outlook com OAuth somente leitura e analise mensagens online ou arquivos exportados em busca de phishing e anexos perigosos.",
+            "Use modo manual (inserindo seu e-mail) ou conecte Gmail/Outlook com OAuth para analise online; tambem e possivel analisar arquivos exportados em busca de phishing e anexos perigosos.",
             [
+                ("email_set_manual_access", "Inserir e-mail manual"),
                 ("email_oauth_help", "Como configurar OAuth"),
                 ("email_connect_gmail", "Conectar Gmail"),
                 ("email_connect_outlook", "Conectar Outlook"),
                 ("email_scan_online", "Analisar caixa online"),
+                ("resolve_emails", "Resolver problemas"),
                 ("email_disconnect_account", "Desconectar conta"),
                 ("email_scan_file", "Analisar e-mails (arquivo)"),
                 ("email_scan_folder", "Analisar e-mails (pasta)"),
@@ -283,22 +368,61 @@ class MainWindow(QMainWindow):
         }
 
     def _build_ui(self) -> None:
-        """Monta a janela principal com barra lateral e empilhamento de paginas."""
+        """Monta a janela com hierarquia de layout limpa e sem scroll areas aninhados.
+
+        Estrutura:
+            appShell  (QHBoxLayout, margens externas)
+            ├── sidebarScrollArea  — largura fixa, scroll vertical quando necessario
+            └── contentArea  (QVBoxLayout)
+                ├── topHeader      — altura natural; nao cresce indefinidamente
+                └── pageSurface    — borda arredondada; ocupa todo espaco restante
+                    └── pageStack  — cada pagina gerencia seu proprio scroll interno
+        """
+        # ── 1. SIDEBAR — largura fixa, scroll vertical se o conteudo transbordar ──
         self.sidebar = SidebarNavigation()
 
+        sidebar_scroll = QScrollArea()
+        sidebar_scroll.setObjectName("sidebarScrollArea")
+        sidebar_scroll.setWidgetResizable(True)
+        sidebar_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        sidebar_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        sidebar_scroll.setWidget(self.sidebar)
+        # Largura fixa = maximo definido pela sidebar; impede expansao horizontal
+        sidebar_scroll.setFixedWidth(self.sidebar.maximumWidth())
+
+        # ── 2. HEADER — sem scroll area; altura determinada pelo proprio conteudo ──
+        self.header_panel = HeaderPanel(APP_NAME, APP_VERSION)
+
+        # ── 3. SURFACE DE PAGINAS — container visual; NAO usa scroll area externo ──
+        # Sem scroll area externo, o QStackedWidget recebe exatamente o espaco
+        # alocado pelo layout, permitindo que stretch=1 funcione corretamente
+        # dentro das paginas (ex.: painel de atividade no dashboard).
+        # Cada pagina declara seu scroll interno quando necessario.
+        page_surface = QWidget()
+        page_surface.setObjectName("pageSurface")
+        page_surface_layout = QVBoxLayout(page_surface)
+        page_surface_layout.setContentsMargins(10, 8, 10, 8)
+        page_surface_layout.setSpacing(0)
+        page_surface_layout.addWidget(self.page_stack, 1)  # stretch=1: ocupa tudo
+
+        # ── 4. PAINEL DIREITO — header fixo no topo, surface expande abaixo ──────
         content_area = QWidget()
         content_area.setObjectName("contentArea")
         content_layout = QVBoxLayout(content_area)
-        content_layout.setContentsMargins(24, 20, 24, 20)
-        content_layout.setSpacing(16)
-        content_layout.addWidget(self.page_stack, 1)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(12)
+        content_layout.addWidget(self.header_panel, 0)  # nao estica
+        content_layout.addWidget(page_surface, 1)        # estica para preencher
 
+        # ── 5. SHELL — sidebar (largura fixa) + painel direito (expande) ─────────
         shell = QWidget(self)
+        shell.setObjectName("appShell")
         shell_layout = QHBoxLayout(shell)
-        shell_layout.setContentsMargins(0, 0, 0, 0)
-        shell_layout.setSpacing(0)
-        shell_layout.addWidget(self.sidebar)
-        shell_layout.addWidget(content_area, 1)
+        shell_layout.setContentsMargins(14, 14, 14, 14)
+        shell_layout.setSpacing(14)
+        shell_layout.addWidget(sidebar_scroll, 0)  # largura fixa; nao recebe stretch
+        shell_layout.addWidget(content_area, 1)    # expande horizontalmente
 
         self.setCentralWidget(shell)
         self.setStatusBar(self._build_status_bar())
@@ -313,6 +437,7 @@ class MainWindow(QMainWindow):
     def _connect_signals(self) -> None:
         """Liga navegacao e botoes das paginas ao roteador principal de acoes."""
         self.sidebar.page_selected.connect(self._switch_page)
+        self.dashboard_page.real_time_protection_toggled.connect(self.toggle_real_time_protection)
         self.dashboard_page.action_requested.connect(self._handle_action_request)
         self.files_page.action_requested.connect(self._handle_action_request)
         self.processes_page.action_requested.connect(self._handle_action_request)
@@ -327,6 +452,7 @@ class MainWindow(QMainWindow):
 
     def _populate_initial_logs(self) -> None:
         """Registra as primeiras mensagens no dashboard ao abrir a aplicacao."""
+        protection_status = "ativada" if self._real_time_protection_enabled else "desativada"
         self.dashboard_page.append_activity(
             [
                 "[Inicializacao] Interface profissional carregada com sucesso.",
@@ -334,6 +460,7 @@ class MainWindow(QMainWindow):
                 f"[Inicializacao] Pasta de quarentena pronta em: {self.context.paths.quarantine_dir}",
                 f"[Inicializacao] Pasta de relatorios pronta em: {self.context.paths.reports_dir}",
                 f"[Inicializacao] Log diario ativo em: {self.context.paths.daily_log_file}",
+                f"[Protecao] Protecao em tempo real {protection_status} na inicializacao.",
             ]
         )
 
@@ -350,6 +477,8 @@ class MainWindow(QMainWindow):
             self._refresh_quarantine_page()
         elif page_id == "history":
             self._refresh_history_page()
+        if page_id == "dashboard":
+            self.dashboard_page.actions_panel.focus_carousel()
 
     def _handle_action_request(self, action_key: str) -> None:
         """Roteia as acoes disparadas pelas paginas e pela barra lateral auxiliar."""
@@ -359,6 +488,9 @@ class MainWindow(QMainWindow):
         if action_key == "full_scan":
             self._start_full_scan()
             return
+        if action_key == "resolve_files":
+            self._resolve_file_problems()
+            return
         if action_key == "pause_scan":
             self._toggle_file_scan_pause()
             return
@@ -367,6 +499,9 @@ class MainWindow(QMainWindow):
             return
         if action_key == "process_scan":
             self._start_process_scan()
+            return
+        if action_key == "resolve_processes":
+            self._resolve_process_problems()
             return
         if action_key == "pause_process_scan":
             self._toggle_process_scan_pause()
@@ -380,11 +515,20 @@ class MainWindow(QMainWindow):
         if action_key == "startup_scan":
             self._start_startup_scan()
             return
+        if action_key == "resolve_startup":
+            self._resolve_startup_problems()
+            return
         if action_key == "browser_scan":
             self._start_browser_scan()
             return
+        if action_key == "resolve_browsers":
+            self._resolve_browser_problems()
+            return
         if action_key == "browser_view_suspicious":
             self._show_browser_suspicious_items()
+            return
+        if action_key == "browser_view_extensions":
+            self._show_edge_extensions_manager()
             return
         if action_key == "pause_browser_scan":
             self._toggle_browser_scan_pause()
@@ -394,6 +538,9 @@ class MainWindow(QMainWindow):
             return
         if action_key == "email_scan_file":
             self._start_email_scan_file()
+            return
+        if action_key == "email_set_manual_access":
+            self._request_manual_email_access()
             return
         if action_key == "email_oauth_help":
             self._show_email_oauth_setup_guide()
@@ -406,6 +553,9 @@ class MainWindow(QMainWindow):
             return
         if action_key == "email_scan_online":
             self._start_email_online_scan()
+            return
+        if action_key == "resolve_emails":
+            self._resolve_email_problems()
             return
         if action_key == "email_disconnect_account":
             self._disconnect_email_provider()
@@ -470,6 +620,9 @@ class MainWindow(QMainWindow):
         if action_key == "restore_quarantine":
             self._restore_selected_quarantine_item()
             return
+        if action_key == "restore_all_quarantine":
+            self._restore_all_quarantine_items()
+            return
         if action_key == "delete_quarantine":
             self._delete_selected_quarantine_item()
             return
@@ -494,7 +647,347 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
 
+        self._stop_real_time_monitors()
         super().closeEvent(event)
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        """Inicia o monitor de pre-execucao quando a janela fica visivel pela primeira vez."""
+        super().showEvent(event)
+        if self._real_time_protection_enabled:
+            self._start_real_time_monitors(log_activity=True)
+        else:
+            self._stop_real_time_monitors()
+        self.update_protection_ui_state()
+
+    def _poll_pre_exec_alerts(self) -> None:
+        """Drena a fila de alertas de pre-execucao (executado na thread Qt via QTimer)."""
+        while not self._pre_exec_alert_queue.empty():
+            try:
+                alert = self._pre_exec_alert_queue.get_nowait()
+            except Exception:
+                break
+            self._handle_pre_execution_alert(alert)
+
+    def _handle_pre_execution_alert(self, alert: PreExecutionAlert) -> None:
+        """Registra um alerta de pre-execucao na interface."""
+        self._pre_exec_alert_count += 1
+        fname = alert.file_path.name
+
+        lines = [f"[Pre-exec] {alert.severity_label}: {fname} (score {alert.score})"]
+        for reason in alert.reasons[:3]:
+            lines.append(f"  \u2192 {reason}")
+        self.dashboard_page.append_activity(lines)
+
+        self._refresh_monitor_chip(warn=alert.risk_level in (RiskLevel.CRITICAL, RiskLevel.HIGH))
+
+        self.statusBar().showMessage(
+            f"[Pre-exec] {alert.severity_label} detectado: {fname}", 8000
+        )
+
+        if alert.risk_level in (RiskLevel.CRITICAL, RiskLevel.HIGH):
+            from PySide6.QtWidgets import QMessageBox
+            body_lines = [
+                f"Arquivo: {fname}",
+                f"Score de risco: {alert.score}",
+                f"Nivel: {alert.severity_label}",
+                "",
+                "Motivos:",
+            ] + [f"\u2022 {r}" for r in alert.reasons[:5]]
+            QMessageBox.warning(
+                self,
+                f"Alerta de pre-execucao \u2014 {alert.severity_label}",
+                "\n".join(body_lines),
+            )
+
+    def _poll_network_alerts(self) -> None:
+        """Drena a fila de alertas do monitor de intrusao de rede."""
+        while not self._network_alert_queue.empty():
+            try:
+                alert = self._network_alert_queue.get_nowait()
+            except Exception:
+                break
+            self._handle_network_intrusion_alert(alert)
+
+    def _handle_network_intrusion_alert(self, alert: NetworkIntrusionAlert) -> None:
+        """Registra um alerta de ataque de rede detectado por comportamento."""
+        self._network_alert_count += 1
+        self.dashboard_page.append_activity([
+            (
+                f"[NetGuard] {alert.severity_label}: {alert.kind} | "
+                f"{alert.process_name} (PID {alert.process_id}) -> {alert.remote_ip}:{alert.remote_port} "
+                f"(score {alert.score})"
+            ),
+            (
+                f"  > AutoBlock: IP {alert.blocked_ip} bloqueado ({alert.firewall_rule_name})"
+                if alert.blocked_ip
+                else "  > AutoBlock: sem bloqueio automatico"
+            ),
+            *[f"  > {reason}" for reason in alert.reasons[:3]],
+        ])
+
+        self._refresh_monitor_chip(warn=alert.risk_level in (RiskLevel.CRITICAL, RiskLevel.HIGH))
+        self.statusBar().showMessage(
+            (
+                f"[NetGuard] {alert.kind} detectado: {alert.process_name} "
+                f"(PID {alert.process_id})"
+            ),
+            9000,
+        )
+
+        if alert.risk_level in (RiskLevel.CRITICAL, RiskLevel.HIGH):
+            QMessageBox.warning(
+                self,
+                f"Alerta de rede - {alert.severity_label}",
+                "\n".join([
+                    f"Tipo: {alert.kind}",
+                    f"Processo: {alert.process_name} (PID {alert.process_id})",
+                    f"Destino: {alert.remote_ip}:{alert.remote_port}",
+                    f"Score: {alert.score}",
+                    (
+                        f"IP bloqueado automaticamente: {alert.blocked_ip}"
+                        if alert.blocked_ip
+                        else "IP bloqueado automaticamente: nao"
+                    ),
+                    "",
+                    "Motivos:",
+                    *[f"- {reason}" for reason in alert.reasons[:5]],
+                ]),
+            )
+
+    def _poll_ransom_alerts(self) -> None:
+        """Drena a fila de alertas do monitor anti-ransomware/wiper."""
+        while not self._ransom_alert_queue.empty():
+            try:
+                alert = self._ransom_alert_queue.get_nowait()
+            except Exception:
+                break
+            self._handle_ransom_behavior_alert(alert)
+
+    def _handle_ransom_behavior_alert(self, alert: RansomwareBehaviorAlert) -> None:
+        """Registra alerta de atividade massiva de arquivos (ransom/wiper)."""
+        self._ransom_alert_count += 1
+
+        self.dashboard_page.append_activity([
+            (
+                f"[RansomGuard] {alert.severity_label}: atividade massiva em {alert.watched_root} "
+                f"(score {alert.score})"
+            ),
+            (
+                "  > eventos: "
+                f"mod={alert.changed_files} novo={alert.created_files} "
+                f"del={alert.deleted_files} ext_sus={alert.suspicious_extension_hits}"
+            ),
+            *[f"  > {reason}" for reason in alert.reasons[:3]],
+        ])
+
+        self._refresh_monitor_chip(warn=alert.risk_level in (RiskLevel.CRITICAL, RiskLevel.HIGH))
+        self.statusBar().showMessage(
+            f"[RansomGuard] Atividade massiva suspeita detectada em {alert.watched_root}",
+            10_000,
+        )
+
+        if alert.risk_level in (RiskLevel.CRITICAL, RiskLevel.HIGH):
+            QMessageBox.warning(
+                self,
+                f"Alerta anti-ransomware - {alert.severity_label}",
+                "\n".join([
+                    f"Pasta monitorada: {alert.watched_root}",
+                    f"Score: {alert.score}",
+                    (
+                        "Eventos: "
+                        f"mod={alert.changed_files} novo={alert.created_files} "
+                        f"del={alert.deleted_files} ext_sus={alert.suspicious_extension_hits}"
+                    ),
+                    "",
+                    "Motivos:",
+                    *[f"- {reason}" for reason in alert.reasons[:5]],
+                ]),
+            )
+
+    def _poll_usb_alerts(self) -> None:
+        """Drena alertas do monitor USB/BadUSB."""
+        while not self._usb_alert_queue.empty():
+            try:
+                alert = self._usb_alert_queue.get_nowait()
+            except Exception:
+                break
+            self._handle_usb_security_alert(alert)
+
+    def _handle_usb_security_alert(self, alert: UsbSecurityAlert) -> None:
+        """Registra alertas de dispositivo USB nao confiavel e possivel HID injection."""
+        self._usb_alert_count += 1
+        self.dashboard_page.append_activity([
+            (
+                f"[USBGuard] {alert.severity_label}: {alert.kind} | "
+                f"{alert.device_name} ({alert.device_class})"
+                f" (score {alert.score})"
+            ),
+            f"  > Device ID: {alert.device_instance_id}",
+            *[f"  > {reason}" for reason in alert.reasons[:3]],
+        ])
+
+        self._refresh_monitor_chip(warn=alert.risk_level in (RiskLevel.CRITICAL, RiskLevel.HIGH))
+        self.statusBar().showMessage(
+            f"[USBGuard] Evento USB suspeito: {alert.device_name}",
+            10_000,
+        )
+
+        if alert.risk_level in (RiskLevel.CRITICAL, RiskLevel.HIGH):
+            QMessageBox.warning(
+                self,
+                f"Alerta USB/BadUSB - {alert.severity_label}",
+                "\n".join([
+                    f"Tipo: {alert.kind}",
+                    f"Dispositivo: {alert.device_name}",
+                    f"Classe: {alert.device_class}",
+                    f"Device ID: {alert.device_instance_id}",
+                    f"Score: {alert.score}",
+                    "",
+                    "Motivos:",
+                    *[f"- {reason}" for reason in alert.reasons[:5]],
+                ]),
+            )
+
+    def _refresh_monitor_chip(self, *, warn: bool = False) -> None:
+        """Atualiza o resumo consolidado do monitor no dashboard."""
+        if not self._real_time_protection_enabled:
+            self.dashboard_page.update_monitor_status("Monitor: desativado", inactive=True)
+            return
+
+        label = (
+            f"Monitor: pre={self._pre_exec_alert_count} "
+            f"rede={self._network_alert_count} "
+            f"ransom={self._ransom_alert_count} "
+            f"usb={self._usb_alert_count}"
+        )
+        self.dashboard_page.update_monitor_status(label, alert=warn)
+
+    def toggle_real_time_protection(self) -> None:
+        """Alterna o estado da protecao em tempo real a partir da UI."""
+        if self._real_time_protection_enabled:
+            self.disable_real_time_protection()
+            return
+        self.enable_real_time_protection()
+
+    def enable_real_time_protection(self) -> None:
+        """Ativa a protecao em tempo real e inicializa os monitores em background."""
+        if self._real_time_protection_enabled:
+            self.update_protection_ui_state()
+            return
+
+        self._real_time_protection_enabled = True
+        self._save_real_time_protection_preference()
+        self._start_real_time_monitors(log_activity=False)
+        self.update_protection_ui_state()
+        self.dashboard_page.append_activity([
+            "[Protecao] Protecao em tempo real ativada pelo usuario.",
+            "[Monitor] Monitoramento de pre-execucao ativo.",
+            "[Monitor] Monitoramento de intrusao em rede ativo.",
+            "[Monitor] Monitoramento anti-ransomware ativo.",
+            "[Monitor] Protecao BadUSB/USB ativo.",
+            "[Monitor] Pastas: Downloads, Desktop, Documentos, Temp.",
+        ])
+        self.statusBar().showMessage("Protecao em tempo real ativada.", 7000)
+        log_info(self.context.logger, "[Protecao] Protecao em tempo real ativada pelo usuario.")
+
+    def disable_real_time_protection(self) -> None:
+        """Desativa a protecao em tempo real e encerra os monitores de forma segura."""
+        if not self._real_time_protection_enabled:
+            self.update_protection_ui_state()
+            return
+
+        self._real_time_protection_enabled = False
+        self._save_real_time_protection_preference()
+        self._stop_real_time_monitors()
+        self.update_protection_ui_state()
+        self.dashboard_page.append_activity([
+            "[Protecao] Protecao em tempo real desativada pelo usuario.",
+            "[Monitor] Monitoramento em tempo real desativado com seguranca.",
+        ])
+        self.statusBar().showMessage("Protecao em tempo real desativada.", 7000)
+        log_info(self.context.logger, "[Protecao] Protecao em tempo real desativada pelo usuario.")
+
+    def update_protection_ui_state(self) -> None:
+        """Sincroniza os chips do dashboard com o estado real da protecao."""
+        self.dashboard_page.update_protection_ui_state(enabled=self._real_time_protection_enabled)
+        if self._real_time_protection_enabled:
+            self._refresh_monitor_chip()
+            return
+        self.dashboard_page.update_monitor_status("Monitor: desativado", inactive=True)
+
+    def _start_real_time_monitors(self, *, log_activity: bool) -> None:
+        """Inicia monitores e timers de protecao em tempo real sem duplicar execucao."""
+        if self._pre_exec_poll_timer.isActive():
+            return
+
+        self._pre_exec_monitor.start()
+        self._pre_exec_poll_timer.start()
+        self._network_monitor.start()
+        self._network_poll_timer.start()
+        self._ransom_monitor.start()
+        self._ransom_poll_timer.start()
+        self._usb_guard_monitor.start()
+        self._usb_poll_timer.start()
+        if log_activity:
+            self.dashboard_page.append_activity([
+                "[Monitor] Monitoramento de pre-execucao ativo.",
+                "[Monitor] Monitoramento de intrusao em rede ativo.",
+                "[Monitor] Monitoramento anti-ransomware ativo.",
+                "[Monitor] Protecao BadUSB/USB ativo.",
+                "[Monitor] Pastas: Downloads, Desktop, Documentos, Temp.",
+            ])
+
+    def _stop_real_time_monitors(self) -> None:
+        """Para os monitores em tempo real e drena eventos pendentes."""
+        self._pre_exec_poll_timer.stop()
+        self._network_poll_timer.stop()
+        self._ransom_poll_timer.stop()
+        self._usb_poll_timer.stop()
+
+        self._pre_exec_monitor.stop()
+        self._network_monitor.stop()
+        self._ransom_monitor.stop()
+        self._usb_guard_monitor.stop()
+
+        self._drain_alert_queue(self._pre_exec_alert_queue)
+        self._drain_alert_queue(self._network_alert_queue)
+        self._drain_alert_queue(self._ransom_alert_queue)
+        self._drain_alert_queue(self._usb_alert_queue)
+
+    @staticmethod
+    def _drain_alert_queue(alert_queue: queue.Queue) -> None:
+        """Remove eventos pendentes de uma fila para evitar alertas apos desativacao."""
+        while True:
+            try:
+                alert_queue.get_nowait()
+            except queue.Empty:
+                break
+
+    def _save_real_time_protection_preference(self) -> None:
+        """Persiste a preferencia de protecao em tempo real no diretorio de dados local."""
+        payload = {
+            "real_time_protection_enabled": self._real_time_protection_enabled,
+        }
+        try:
+            self._runtime_preferences_file.write_text(
+                json.dumps(payload, ensure_ascii=True, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as error:
+            log_warning(self.context.logger, f"[Protecao] Falha ao salvar preferencia de runtime: {error}")
+
+    def _load_real_time_protection_preference(self) -> bool:
+        """Carrega preferencia persistida de protecao em tempo real (padrao: ligada)."""
+        if not self._runtime_preferences_file.exists():
+            return True
+
+        try:
+            payload = json.loads(self._runtime_preferences_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return True
+
+        value = payload.get("real_time_protection_enabled")
+        return bool(value) if isinstance(value, bool) else True
 
     def _start_quick_scan(self) -> None:
         """Solicita a pasta ao usuario e executa a verificacao de arquivos em background."""
@@ -874,6 +1367,277 @@ class MainWindow(QMainWindow):
         dialog = BrowserSuspiciousItemsDialog(list(report.results), self)
         dialog.exec()
 
+    def _resolve_file_problems(self) -> None:
+        """Abre o fluxo de resolucao de arquivos suspeitos via quarentena seletiva."""
+        if self.last_file_scan_report is None or not self.last_file_scan_report.results:
+            QMessageBox.information(self, "Sem problemas", "Execute a verificacao de arquivos antes de resolver problemas deste modulo.")
+            return
+        self._open_quarantine_selection()
+
+    def _resolve_process_problems(self) -> None:
+        """Abre o fluxo de resolucao de processos suspeitos via quarentena seletiva."""
+        if self.last_process_scan_report is None or not self.last_process_scan_report.results:
+            QMessageBox.information(self, "Sem problemas", "Execute a verificacao de processos antes de resolver problemas deste modulo.")
+            return
+        self._open_process_quarantine_selection()
+
+    def _resolve_startup_problems(self) -> None:
+        """Abre o fluxo de resolucao de startup suspeito via quarentena seletiva."""
+        if self.last_startup_scan_report is None or not self.last_startup_scan_report.results:
+            QMessageBox.information(self, "Sem problemas", "Execute a verificacao de inicializacao antes de resolver problemas deste modulo.")
+            return
+        self._open_startup_quarantine_selection()
+
+    def _resolve_browser_problems(self) -> None:
+        """Direciona a resolucao de riscos de navegador para a ferramenta apropriada."""
+        report = self.last_browser_scan_report
+        if report is None or not report.results:
+            QMessageBox.information(self, "Sem problemas", "Execute a analise de navegadores antes de resolver problemas deste modulo.")
+            return
+
+        has_edge_extensions = any(item.browser == "Edge" and item.item_type == "Extensao Edge" for item in report.results)
+        if has_edge_extensions:
+            self._show_edge_extensions_manager()
+            return
+
+        guidance_path = self._write_module_guidance_log(
+            module_name="browser",
+            title="Guia tecnico de resolucao - Navegadores",
+            intro_lines=[
+                "Nao ha correcao automatica segura disponivel para os achados atuais deste modulo.",
+                "Revise apenas os itens suspeitos selecionados no dialogo de navegadores e aplique a acao manual adequada.",
+            ],
+            item_lines=[
+                [
+                    f"Nome: {item.name}",
+                    f"Navegador: {item.browser}",
+                    f"Tipo: {item.item_type}",
+                    f"Caminho: {item.path or '-'}",
+                    f"Motivos: {'; '.join(item.reasons) or '-'}",
+                ]
+                for item in report.results
+            ],
+        )
+        QMessageBox.information(
+            self,
+            "Resolucao manual guiada",
+            "Os achados atuais de navegador exigem revisao manual. O guia tecnico foi salvo em:\n\n"
+            f"{guidance_path}\n\nUse 'Ver itens suspeitos' para inspecionar os itens individualmente.",
+        )
+
+    def _resolve_email_problems(self) -> None:
+        """Gera orientacao tecnica para tratamento manual de e-mails suspeitos."""
+        report = self.last_email_scan_report
+        if report is None or not report.results:
+            QMessageBox.information(self, "Sem problemas", "Execute a analise de e-mails antes de resolver problemas deste modulo.")
+            return
+
+        guidance_path = self._write_module_guidance_log(
+            module_name="email",
+            title="Guia tecnico de resolucao - E-mails suspeitos",
+            intro_lines=[
+                "O modulo de e-mails nao altera mensagens automaticamente.",
+                "Revise apenas as mensagens suspeitas que voce deseja tratar e exclua, mova ou bloqueie no provedor/origem correspondente.",
+            ],
+            item_lines=[
+                [
+                    f"Origem: {item.source_label or item.source_file}",
+                    f"Arquivo/local: {item.source_file}",
+                    f"Assunto: {item.subject}",
+                    f"Remetente: {item.sender}",
+                    f"Links encontrados: {item.links_found}",
+                    f"Anexos encontrados: {item.attachments_found}",
+                    f"Motivos: {'; '.join(item.reasons) or '-'}",
+                    "Acao sugerida: remover a mensagem, bloquear o remetente e evitar abrir links/anexos.",
+                ]
+                for item in report.results
+            ],
+        )
+        QMessageBox.information(
+            self,
+            "Resolucao manual guiada",
+            "Os e-mails suspeitos exigem tratamento manual. O guia tecnico foi salvo em:\n\n"
+            f"{guidance_path}",
+        )
+
+    def _write_module_guidance_log(
+        self,
+        *,
+        module_name: str,
+        title: str,
+        intro_lines: list[str],
+        item_lines: list[list[str]],
+    ) -> Path:
+        """Salva um guia tecnico por modulo para itens que ainda dependem de revisao manual."""
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = self.context.paths.logs_dir / f"{module_name}-resolution-guide-{timestamp}.txt"
+        lines = [title, f"Gerado em: {datetime.now().isoformat(timespec='seconds')}", ""]
+        lines.extend(intro_lines)
+        lines.append("")
+
+        for index, block in enumerate(item_lines, start=1):
+            lines.append(f"[{index}]")
+            lines.extend(block)
+            lines.append("")
+
+        path.write_text("\n".join(lines), encoding="utf-8")
+        return path
+
+    def _show_edge_extensions_manager(self) -> None:
+        """Abre o gerenciador de extensoes do Edge com inventario e acoes de remediacao."""
+        if self._edge_extensions_dialog is None:
+            self._edge_extensions_dialog = EdgeExtensionsDialog(self)
+            self._edge_extensions_dialog.action_requested.connect(self._handle_edge_extensions_action)
+
+        inventory = self.browser_security_service.list_edge_extensions()
+        self._edge_extensions_dialog.set_inventory(inventory)
+        self._append_to_page(
+            "browsers",
+            [
+                f"[Navegadores] Inventario do Edge carregado. Perfis={len(inventory.profiles)} | extensoes={len(inventory.extensions)} | erros={len(inventory.errors)}"
+            ],
+        )
+        self.statusBar().showMessage("Inventario de extensoes do Edge atualizado.")
+        self._edge_extensions_dialog.exec()
+
+    def _handle_edge_extensions_action(self, action_name: str, payload: object) -> None:
+        """Executa as acoes do dialogo de extensoes do Edge com confirmacao e auditoria."""
+        if action_name == "refresh":
+            if self._edge_extensions_dialog is not None:
+                inventory = self.browser_security_service.list_edge_extensions()
+                self._edge_extensions_dialog.set_inventory(inventory)
+                self.statusBar().showMessage("Inventario de extensoes do Edge atualizado.")
+            return
+
+        if not isinstance(payload, EdgeExtensionRecord):
+            return
+
+        policy = self._build_edge_extension_policy(action_name, payload)
+        target_summary = (
+            f"Perfil: {payload.profile_name} | Nome: {payload.name} | ID: {payload.extension_id} | Caminho: {payload.install_path}"
+        )
+        correlation_id = self._confirm_sensitive_action(policy, target_summary=target_summary)
+        if correlation_id is None:
+            return
+
+        try:
+            if action_name == "disable":
+                result = self.browser_security_service.disable_edge_extension(payload, user_confirmed=True)
+            elif action_name == "quarantine":
+                result = self.browser_security_service.quarantine_edge_extension(payload, user_confirmed=True)
+            elif action_name == "remove":
+                result = self.browser_security_service.remove_edge_extension(payload, user_confirmed=True)
+            else:
+                return
+        except Exception as error:
+            log_error(self.context.logger, "Falha ao executar acao de extensao do Edge.", error)
+            self._record_action_event(
+                policy,
+                target_summary,
+                "approved",
+                "failed",
+                f"Erro inesperado: {error}",
+                correlation_id,
+            )
+            QMessageBox.critical(self, "Falha na acao", f"Nao foi possivel concluir a operacao: {error}")
+            return
+
+        self._handle_edge_extension_action_result(policy, target_summary, correlation_id, result)
+
+    def _build_edge_extension_policy(self, action_name: str, extension: EdgeExtensionRecord) -> ActionPolicy:
+        """Cria politica de confirmacao para as acoes de extensoes do Edge."""
+        if action_name == "disable":
+            return build_action_policy(
+                action_id="edge_extension_disable",
+                title="Desativar extensao do Edge",
+                description="A extensao sera marcada como desativada no perfil selecionado e um backup das configuracoes sera salvo antes da alteracao.",
+                severity=ActionSeverity.SENSITIVE,
+                confirm_label="Desativar extensao",
+                detail_lines=(
+                    "O SentinelaPC altera Preferences e, quando existir, Secure Preferences.",
+                    "Um backup local e criado antes de qualquer escrita.",
+                    "Se o Edge estiver aberto, o arquivo pode estar bloqueado e a acao pode falhar.",
+                ),
+                confirm_phrase=extension.extension_id,
+            )
+
+        if action_name == "quarantine":
+            return build_action_policy(
+                action_id="edge_extension_quarantine",
+                title="Mover extensao do Edge para quarentena",
+                description="A pasta da extensao sera retirada do perfil do Edge e movida para a quarentena da aplicacao com metadados de reversao.",
+                severity=ActionSeverity.HIGH,
+                confirm_label="Mover para quarentena",
+                detail_lines=(
+                    "A extensao sera desativada antes da movimentacao sempre que possivel.",
+                    "O conteudo sera preservado na quarentena do SentinelaPC, sem exclusao definitiva.",
+                    "Fechar o Edge reduz risco de bloqueio de arquivos.",
+                ),
+                confirm_phrase=extension.extension_id,
+            )
+
+        return build_action_policy(
+            action_id="edge_extension_remove",
+            title="Remover extensao do Edge com seguranca",
+            description="A extensao sera removida do perfil do Edge, mas o conteudo ainda sera preservado na quarentena local para auditoria e eventual reversao manual.",
+            severity=ActionSeverity.HIGH,
+            confirm_label="Remover extensao",
+            detail_lines=(
+                "Antes da alteracao, o SentinelaPC cria backups das configuracoes do perfil.",
+                "A remocao nao apaga imediatamente da quarentena local.",
+                "Use esta opcao apenas para extensoes suspeitas ou nao autorizadas.",
+            ),
+            confirm_phrase=extension.extension_id,
+        )
+
+    def _handle_edge_extension_action_result(
+        self,
+        policy: ActionPolicy,
+        target_summary: str,
+        correlation_id: str,
+        result: EdgeExtensionActionResult,
+    ) -> None:
+        """Atualiza UI, logs e trilha de auditoria apos acao em extensao do Edge."""
+        details = result.message
+        if result.backup_paths:
+            details += f" | backups={len(result.backup_paths)}"
+        if result.quarantine_path is not None:
+            details += f" | quarentena={result.quarantine_path}"
+        if result.warnings:
+            details += f" | avisos={'; '.join(result.warnings)}"
+
+        self._record_action_event(
+            policy,
+            target_summary,
+            "approved",
+            "succeeded" if result.success else "failed",
+            details,
+            correlation_id,
+        )
+
+        page_lines = [f"[Edge] {result.message}"]
+        if result.quarantine_path is not None:
+            page_lines.append(f"[Edge] Destino em quarentena: {result.quarantine_path}")
+        if result.backup_paths:
+            page_lines.append(f"[Edge] Backups criados: {len(result.backup_paths)}")
+        page_lines.extend(f"[Edge] Aviso: {warning}" for warning in result.warnings)
+        self._append_to_page("browsers", page_lines)
+        self._append_dashboard_activity(page_lines)
+        self.statusBar().showMessage(result.message)
+
+        if self._edge_extensions_dialog is not None:
+            inventory = self.browser_security_service.list_edge_extensions()
+            self._edge_extensions_dialog.set_inventory(inventory)
+
+        dialog_text = result.message
+        if result.warnings:
+            dialog_text += "\n\nAvisos:\n" + "\n".join(result.warnings)
+
+        if result.success:
+            QMessageBox.information(self, "Operacao concluida", dialog_text)
+        else:
+            QMessageBox.warning(self, "Operacao nao concluida", dialog_text)
+
     def _start_email_scan_file(self) -> None:
         """Inicia analise local de um ou mais arquivos de e-mail selecionados."""
         selected_files, _ = QFileDialog.getOpenFileNames(
@@ -996,6 +1760,85 @@ class MainWindow(QMainWindow):
         )
         QMessageBox.information(self, guide_title, message)
 
+    def _request_manual_email_access(self) -> None:
+        """Solicita o e-mail manualmente quando o usuario nao quiser usar OAuth/API."""
+        if self._has_active_background_task():
+            self._append_to_page("emails", ["[E-mails] Aguarde o termino da operacao atual para inserir e-mail manual."])
+            return
+
+        seed_value = self._manual_email_address or ""
+        email_text, confirmed = QInputDialog.getText(
+            self,
+            "Acesso manual de e-mail",
+            "Insira seu e-mail por favor:",
+            text=seed_value,
+        )
+        if not confirmed:
+            self._append_to_page("emails", ["[E-mails] Insercao manual de e-mail cancelada pelo usuario."])
+            return
+
+        normalized = email_text.strip().lower()
+        if not normalized:
+            QMessageBox.warning(self, "E-mail invalido", "Informe um endereco de e-mail para continuar.")
+            return
+
+        if not self._is_valid_email_address(normalized):
+            QMessageBox.warning(self, "E-mail invalido", "Formato de e-mail invalido. Exemplo: usuario@provedor.com")
+            return
+
+        self._manual_email_address = normalized
+        self._persist_manual_email_address(normalized)
+        self._append_to_page(
+            "emails",
+            [
+                f"[E-mails] Acesso manual configurado para: {normalized}",
+                "[E-mails] Modo manual ativo: use analise por arquivo/pasta para verificar mensagens sem API do Google.",
+            ],
+        )
+        self.statusBar().showMessage("E-mail manual configurado com sucesso.")
+        QMessageBox.information(
+            self,
+            "Modo manual ativado",
+            (
+                "E-mail salvo com sucesso.\n\n"
+                "Agora voce pode usar o modulo de e-mails sem configurar API do Google. "
+                "Para analise de mensagens, utilize os botoes de arquivo/pasta exportados."
+            ),
+        )
+
+    def _is_valid_email_address(self, value: str) -> bool:
+        """Valida de forma simples o formato de um e-mail informado pelo usuario."""
+        return bool(re.fullmatch(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", value))
+
+    def _persist_manual_email_address(self, value: str) -> None:
+        """Persiste o e-mail manual no diretorio de dados da aplicacao."""
+        payload = {
+            "email": value,
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        try:
+            self._manual_email_access_file.parent.mkdir(parents=True, exist_ok=True)
+            self._manual_email_access_file.write_text(
+                json.dumps(payload, ensure_ascii=True, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as error:
+            log_error(self.context.logger, "Falha ao salvar o e-mail manual informado pelo usuario.", error)
+
+    def _load_manual_email_address(self) -> str | None:
+        """Carrega o e-mail manual salvo anteriormente, se existir e for valido."""
+        try:
+            if not self._manual_email_access_file.exists():
+                return None
+
+            payload = json.loads(self._manual_email_access_file.read_text(encoding="utf-8"))
+            email_value = str(payload.get("email") or "").strip().lower()
+            if not email_value or not self._is_valid_email_address(email_value):
+                return None
+            return email_value
+        except Exception:
+            return None
+
     def _disconnect_email_provider(self) -> None:
         """Desconecta a conta online atualmente selecionada no modulo de e-mails."""
         provider = self._connected_email_provider or self._resolve_connected_email_provider()
@@ -1029,10 +1872,29 @@ class MainWindow(QMainWindow):
 
         provider = self._connected_email_provider or self._resolve_connected_email_provider()
         if provider is None:
-            QMessageBox.information(
-                self,
-                "Conta nao conectada",
-                "Conecte primeiro uma conta Gmail ou Outlook para analisar a caixa online.",
+            if self._manual_email_address is None:
+                self._request_manual_email_access()
+
+            if self._manual_email_address is None:
+                QMessageBox.information(
+                    self,
+                    "Conta nao conectada",
+                    "Sem OAuth e sem e-mail manual informado. Informe um e-mail manual para continuar.",
+                )
+                return
+
+            manual_message = (
+                "Modo manual ativo sem API do Google.\n\n"
+                f"E-mail informado: {self._manual_email_address}\n"
+                "Use os botoes Analisar e-mails (arquivo) ou Analisar e-mails (pasta) para verificar mensagens exportadas."
+            )
+            QMessageBox.information(self, "Modo manual de e-mail", manual_message)
+            self._append_to_page(
+                "emails",
+                [
+                    f"[E-mails] Modo manual ativo para {self._manual_email_address}.",
+                    "[E-mails] Para analise sem OAuth, selecione arquivo(s) .eml/.msg/.txt ou pasta exportada.",
+                ],
             )
             return
 
@@ -1237,7 +2099,7 @@ class MainWindow(QMainWindow):
         )
 
     def _resolve_audit_problems(self) -> None:
-        """Aplica resolucao em lote para todos os achados inseguros suportados."""
+        """Resolve apenas os achados selecionados na auditoria, com suporte a debug guiado."""
         if self._has_active_background_task():
             QMessageBox.information(self, "Operacao em andamento", "Aguarde o termino da operacao atual antes de resolver problemas.")
             return
@@ -1246,44 +2108,37 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Sem dados", "Execute a Auditoria Avancada antes de resolver problemas.")
             return
 
-        findings_to_fix = [
-            finding
-            for finding in self.last_audit_report.findings
-            if finding.status != AuditStatus.SAFE
-        ]
+        findings_to_fix = [self.audit_service.prepare_finding_for_resolution(finding) for finding in self.audit_page.selected_findings()]
         if not findings_to_fix:
-            QMessageBox.information(self, "Sem problemas", "Nao ha problemas para resolver nesta auditoria.")
-            return
-
-        auto_fixable = [finding for finding in findings_to_fix if finding.auto_resolvable and finding.resolver_key]
-        if not auto_fixable:
             QMessageBox.information(
                 self,
-                "Resolucao manual necessaria",
-                "Foram encontrados problemas, mas nenhum deles possui correcao automatica segura. "
-                "Use as recomendacoes de cada item.",
+                "Selecao obrigatoria",
+                "Selecione um ou mais achados na tabela da Auditoria Avancada para resolver apenas os itens desejados.",
             )
             return
 
+        auto_fixable = [finding for finding in findings_to_fix if finding.auto_resolvable and finding.resolver_key]
+        manual_debug = [finding for finding in findings_to_fix if not (finding.auto_resolvable and finding.resolver_key)]
+
         policy = build_action_policy(
-            action_id="audit_resolve_batch",
-            title="Aplicar correcoes automaticas da auditoria",
-            description="O SentinelaPC vai tentar aplicar apenas correcoes consideradas seguras e suportadas para os achados atuais da auditoria.",
+            action_id="audit_resolve_selected",
+            title="Resolver achados selecionados da auditoria",
+            description="O SentinelaPC vai tratar apenas os achados selecionados pelo usuario, aplicando correcao automatica quando houver suporte e gerando debug guiado para os demais.",
             severity=ActionSeverity.CRITICAL,
-            confirm_label="Aplicar correcoes",
-            requires_admin=any(finding.auto_resolvable for finding in auto_fixable),
+            confirm_label="Resolver selecionados",
+            requires_admin=any(self.audit_service.finding_requires_admin(finding) for finding in auto_fixable),
             admin_reason="Algumas correcoes alteram configuracoes do Windows e exigem elevacao administrativa para serem aplicadas de forma segura.",
             detail_lines=(
-                f"Problemas detectados: {len(findings_to_fix)}",
-                f"Problemas auto-resoluveis: {len(auto_fixable)}",
-                "As correcoes nao removem manualmente itens sem suporte automatico.",
+                f"Achados selecionados: {len(findings_to_fix)}",
+                f"Com automacao segura: {len(auto_fixable)}",
+                f"Com tratamento guiado/manual: {len(manual_debug)}",
+                "Nenhum item fora da selecao atual sera alterado.",
             ),
         )
         correlation_id = self._confirm_sensitive_action(
             policy,
             target_summary=(
-                f"Achados corrigiveis agora: {len(auto_fixable)} | "
-                f"acao manual restante: {len(findings_to_fix) - len(auto_fixable)}"
+                f"Selecionados={len(findings_to_fix)} | automaticos={len(auto_fixable)} | guiados={len(manual_debug)}"
             ),
         )
         if correlation_id is None:
@@ -1300,25 +2155,35 @@ class MainWindow(QMainWindow):
         failed_count = 0
         permission_failed_count = 0
         restart_required = False
+        guided_count = 0
         detail_lines: list[str] = []
-        for finding in auto_fixable:
-            result = self.audit_service.resolve_finding(finding)
-            prefix = "[OK]" if result.applied else "[ERRO]"
+        debug_entries: list[tuple] = []
+        for finding in findings_to_fix:
+            if finding.auto_resolvable and finding.resolver_key:
+                result = self.audit_service.resolve_finding(finding)
+                prefix = "[OK]" if result.applied else "[ERRO]"
+            else:
+                result = self.audit_service.build_debug_resolution_plan(finding)
+                prefix = "[GUIADO]"
+                guided_count += 1
+
+            debug_entries.append((finding, result))
             detail_lines.append(f"{prefix} {finding.problem_name}: {result.message}")
             if result.applied:
                 resolved_count += 1
-            else:
+            elif finding.auto_resolvable and finding.resolver_key:
                 failed_count += 1
                 details_text = " ".join(result.details).lower()
                 if "administrador" in result.message.lower() or "administrador" in details_text:
                     permission_failed_count += 1
             restart_required = restart_required or result.requires_restart
 
-        manual_count = len(findings_to_fix) - len(auto_fixable)
+        debug_log_path = self._write_audit_resolution_debug_log(debug_entries)
         summary = (
+            f"Itens selecionados: {len(findings_to_fix)}\n"
             f"Resolvidos automaticamente: {resolved_count}\n"
             f"Falhas na auto-correcao: {failed_count}\n"
-            f"Exigem acao manual: {manual_count}"
+            f"Itens com plano guiado/manual: {guided_count}"
         )
         if permission_failed_count > 0:
             summary += (
@@ -1327,6 +2192,7 @@ class MainWindow(QMainWindow):
             )
         if restart_required:
             summary += "\n\nAlgumas alteracoes podem exigir reinicializacao do Windows."
+        summary += f"\n\nDebug salvo em: {debug_log_path}"
 
         message = summary
         if detail_lines:
@@ -1336,22 +2202,75 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Resolucao em lote concluida. Reexecute a Auditoria Avancada para validar o resultado.")
 
         final_status = "succeeded"
-        if failed_count > 0 and resolved_count == 0:
+        if failed_count > 0 and resolved_count == 0 and guided_count == 0:
             final_status = "failed"
-        elif failed_count > 0 or manual_count > 0:
+        elif failed_count > 0 or guided_count > 0:
             final_status = "partial"
+
+        page_lines = [
+            f"[Auditoria] Resolucao seletiva executada para {len(findings_to_fix)} achados.",
+            f"[Auditoria] Resolvidos automaticamente: {resolved_count} | falhas: {failed_count} | guiados/manuais: {guided_count}",
+            f"[Auditoria] Debug salvo em: {debug_log_path}",
+        ]
+        self._append_dashboard_activity(page_lines)
 
         self._record_action_event(
             policy,
-            f"auto_fixable={len(auto_fixable)}",
+            f"selected={len(findings_to_fix)}",
             "approved",
             final_status,
             (
                 f"Resolvidos={resolved_count} | falhas={failed_count} | "
-                f"manuais={manual_count} | admin_falhas={permission_failed_count} | reinicio={restart_required}"
+                f"guiados={guided_count} | admin_falhas={permission_failed_count} | reinicio={restart_required} | debug={debug_log_path.name}"
             ),
             correlation_id,
         )
+
+    def _write_audit_resolution_debug_log(self, entries: list[tuple]) -> Path:
+        """Gera um log tecnico detalhado da tentativa de tratamento dos achados selecionados."""
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        log_path = self.context.paths.logs_dir / f"audit-resolution-debug-{timestamp}.txt"
+
+        lines = [
+            f"SentinelaPC - Debug de resolucao da auditoria avancada | {datetime.now().isoformat(timespec='seconds')}",
+            "",
+        ]
+
+        for index, (finding, result) in enumerate(entries, start=1):
+            lines.extend(
+                [
+                    f"[{index}] Problema: {finding.problem_name}",
+                    f"Categoria: {finding.category.value}",
+                    f"Severidade: {finding.severity.value}",
+                    f"Status: {finding.status.value}",
+                    f"Resolver interno: {finding.resolver_key or '-'}",
+                    f"Auto-resoluvel: {'sim' if finding.auto_resolvable and finding.resolver_key else 'nao'}",
+                    f"Resultado aplicado: {'sim' if result.applied else 'nao'}",
+                    f"Mensagem: {result.message}",
+                ]
+            )
+
+            if finding.evidence:
+                lines.append("Evidencias:")
+                lines.extend(f"- {evidence}" for evidence in finding.evidence)
+
+            if finding.recommendation:
+                lines.append(f"Recomendacao: {finding.recommendation}")
+
+            if finding.details:
+                lines.append(f"Detalhes do achado: {finding.details}")
+
+            if result.details:
+                lines.append("Detalhes da resolucao/debug:")
+                lines.extend(f"- {detail}" for detail in result.details)
+
+            if result.requires_restart:
+                lines.append("Observacao: este item pode exigir reinicializacao do Windows.")
+
+            lines.append("")
+
+        log_path.write_text("\n".join(lines), encoding="utf-8")
+        return log_path
 
     def _handle_audit_failed(self, error_message: str) -> None:
         """Registra falha inesperada da auditoria avancada."""
@@ -1651,11 +2570,17 @@ class MainWindow(QMainWindow):
         if report.results:
             summary_lines.append("[Scanner] Lista de itens suspeitos:")
             for result in report.results:
+                verification_details = ""
+                if result.deep_scan_performed:
+                    verification_details = f" | verificacao_profunda={result.deep_scan_summary}"
+                    if result.trusted_publisher:
+                        verification_details += f" | editora={result.trusted_publisher}"
                 summary_lines.append(
                     (
                         f"  - {result.path} | tam={result.size} bytes | ext={result.extension} | "
                         f"score={result.heuristic_score} | classe={result.final_classification.value} | "
                         f"risco={result.initial_risk_level} | motivo={result.alert_reason}"
+                        f"{verification_details}"
                     )
                 )
         else:
@@ -1863,11 +2788,21 @@ class MainWindow(QMainWindow):
             summary_lines.append("[Navegadores] Achados relevantes:")
             for result in report.results:
                 path_text = str(result.path) if result.path is not None else "caminho_indisponivel"
+                extras: list[str] = []
+                if result.profile_name:
+                    extras.append(f"perfil={result.profile_name}")
+                if result.extension_id:
+                    extras.append(f"id={result.extension_id}")
+                if result.version:
+                    extras.append(f"versao={result.version}")
+                if result.status:
+                    extras.append(f"status={result.status}")
+                extra_text = " | " + " | ".join(extras) if extras else ""
                 summary_lines.append(
                     (
                         f"  - navegador={result.browser} | tipo={result.item_type} | nome={result.name} | "
                         f"score={result.score} | classe={result.classification.value} | caminho={path_text} | "
-                        f"motivos={'; '.join(result.reasons)}"
+                        f"motivos={'; '.join(result.reasons)}{extra_text}"
                     )
                 )
         else:
@@ -2750,6 +3685,94 @@ class MainWindow(QMainWindow):
         self._append_dashboard_activity(lines)
         self.statusBar().showMessage("Item restaurado da quarentena com sucesso.")
 
+    def _restore_all_quarantine_items(self) -> None:
+        """Restaura todos os itens ativos da quarentena usando o destino original de cada um."""
+        self._switch_page("quarantine")
+
+        try:
+            items = self.quarantine_service.list_items(include_restored=False)
+        except Exception as error:
+            log_error(self.context.logger, "Falha ao listar itens da quarentena para restauracao em lote.", error)
+            QMessageBox.critical(self, "Falha ao abrir quarentena", f"Nao foi possivel carregar a lista: {error}")
+            return
+
+        active_items = [item for item in items if item.is_active and not item.is_deleted]
+        if not active_items:
+            QMessageBox.information(self, "Nenhum item ativo", "Nao ha itens ativos na quarentena para restaurar.")
+            return
+
+        policy = build_action_policy(
+            action_id="quarantine_restore_all",
+            title="Restaurar todos os itens da quarentena",
+            description="Todos os arquivos ativos serao restaurados para os destinos originais ou para caminhos seguros alternativos quando necessario.",
+            severity=ActionSeverity.HIGH,
+            confirm_label="Restaurar todos",
+            detail_lines=(
+                f"Itens ativos na lista: {len(active_items)}",
+                "A operacao tenta restaurar cada item individualmente e registra falhas sem interromper o lote inteiro.",
+            ),
+        )
+        correlation_id = self._confirm_sensitive_action(
+            policy,
+            target_summary=f"Itens ativos na quarentena: {len(active_items)}",
+        )
+        if correlation_id is None:
+            self._append_dashboard_activity(["[Quarentena] Restauracao em lote cancelada pelo usuario."])
+            return
+
+        restored_items = []
+        failed_messages: list[str] = []
+        for item in active_items:
+            try:
+                restored_items.append(self.quarantine_service.restore_item(item.id, user_confirmed=True))
+            except PermissionError:
+                failed_messages.append(f"{item.original_name}: permissao negada pelo Windows.")
+            except Exception as error:
+                failed_messages.append(f"{item.original_name}: {error}")
+
+        status = "succeeded" if restored_items and not failed_messages else "failed" if failed_messages and not restored_items else "partial"
+        self._record_action_event(
+            policy,
+            f"itens={len(active_items)}",
+            "approved",
+            status,
+            f"Restaurados={len(restored_items)} | falhas={len(failed_messages)}",
+            correlation_id,
+        )
+
+        if failed_messages:
+            for message in failed_messages[:10]:
+                log_warning(self.context.logger, f"Falha na restauracao em lote da quarentena: {message}")
+
+        self._refresh_quarantine_page()
+        lines = [
+            "[Quarentena] Restauracao em lote finalizada.",
+            f"[Quarentena] Itens restaurados com sucesso: {len(restored_items)}",
+            f"[Quarentena] Itens com falha: {len(failed_messages)}",
+        ]
+        if restored_items:
+            preview = ", ".join(item.original_name for item in restored_items[:5])
+            lines.append(f"[Quarentena] Restaurados: {preview}")
+            if len(restored_items) > 5:
+                lines.append(f"[Quarentena] ... e mais {len(restored_items) - 5} item(ns).")
+        if failed_messages:
+            lines.append("[Quarentena] Falhas durante a restauracao em lote:")
+            for message in failed_messages[:10]:
+                lines.append(f"  - {message}")
+            if len(failed_messages) > 10:
+                lines.append(f"  - ... e mais {len(failed_messages) - 10} falha(s).")
+
+        self._append_dashboard_activity(lines)
+        if restored_items and not failed_messages:
+            self.statusBar().showMessage("Todos os itens ativos da quarentena foram restaurados com sucesso.")
+            return
+        if restored_items:
+            self.statusBar().showMessage(
+                f"Restauracao em lote concluida com parcial: {len(restored_items)} restaurado(s), {len(failed_messages)} falha(s)."
+            )
+            return
+        self.statusBar().showMessage("Nenhum item da quarentena foi restaurado.")
+
     def _delete_selected_quarantine_item(self) -> None:
         """Envia para a Lixeira o item selecionado na pagina de quarentena."""
         self._switch_page("quarantine")
@@ -2875,16 +3898,23 @@ class MainWindow(QMainWindow):
         self.dashboard_page.actions_panel.set_action_enabled("generate_report", enabled)
         self.files_page.set_action_enabled("quick_scan", enabled)
         self.files_page.set_action_enabled("full_scan", enabled)
+        self.files_page.set_action_enabled("resolve_files", enabled)
         self.files_page.set_action_enabled("quarantine_file", enabled)
         self.processes_page.set_action_enabled("process_scan", enabled)
+        self.processes_page.set_action_enabled("resolve_processes", enabled)
         self.processes_page.set_action_enabled("quarantine_process", enabled)
         self.startup_page.set_action_enabled("startup_scan", enabled)
+        self.startup_page.set_action_enabled("resolve_startup", enabled)
         self.startup_page.set_action_enabled("quarantine_startup", enabled)
         self.browsers_page.set_action_enabled("browser_scan", enabled)
+        self.browsers_page.set_action_enabled("resolve_browsers", enabled)
+        self.browsers_page.set_action_enabled("browser_view_extensions", enabled)
         self.browsers_page.set_action_enabled("browser_view_suspicious", enabled)
+        self.emails_page.set_action_enabled("email_set_manual_access", enabled)
         self.emails_page.set_action_enabled("email_connect_gmail", enabled)
         self.emails_page.set_action_enabled("email_connect_outlook", enabled)
         self.emails_page.set_action_enabled("email_scan_online", enabled)
+        self.emails_page.set_action_enabled("resolve_emails", enabled)
         self.emails_page.set_action_enabled("email_disconnect_account", enabled)
         self.emails_page.set_action_enabled("email_scan_file", enabled)
         self.emails_page.set_action_enabled("email_scan_folder", enabled)

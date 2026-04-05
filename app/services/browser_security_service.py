@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime
 import json
 import logging
 import os
@@ -10,12 +11,25 @@ from pathlib import Path
 import re
 import subprocess
 import time
+from typing import TypedDict
 
 from app.core.heuristics import HeuristicEngine
 from app.core.risk import ThreatClassification
 from app.services.browser_scan_models import BrowserScanError, BrowserScanItem, BrowserScanReport
+from app.services.edge_extension_models import EdgeExtensionActionResult, EdgeExtensionInventory, EdgeExtensionRecord
+from app.services.edge_extension_service import EdgeExtensionService
 from app.services.file_scanner_service import ScanControl
+from app.services.url_threat_service import UrlThreatService
+from app.services.analyzer_browser import BrowserExtensionAnalyzer
+from app.services.risk_engine import RiskEngine
 from app.utils.logger import log_info, log_warning
+
+
+class _PathMetadata(TypedDict):
+    original_path: Path | None
+    detected_at: datetime
+    existed_at_scan: bool | None
+    filesystem_item_type: str
 
 
 class BrowserSecurityService:
@@ -33,9 +47,24 @@ class BrowserSecurityService:
         "notifications",
     }
 
-    def __init__(self, logger: logging.Logger, heuristic_engine: HeuristicEngine) -> None:
+    def __init__(
+        self,
+        logger: logging.Logger,
+        heuristic_engine: HeuristicEngine,
+        *,
+        data_dir: Path | None = None,
+        quarantine_dir: Path | None = None,
+    ) -> None:
         self.logger = logger
         self.heuristic_engine = heuristic_engine
+        self.url_threat_service = UrlThreatService(data_dir=data_dir)
+        self.browser_analyzer = BrowserExtensionAnalyzer()
+        self.risk_engine = RiskEngine()
+        self.edge_extension_service = (
+            EdgeExtensionService(logger, data_dir, quarantine_dir)
+            if data_dir is not None and quarantine_dir is not None
+            else None
+        )
 
     def analyze_browsers(
         self,
@@ -159,6 +188,7 @@ class BrowserSecurityService:
             risk_level=evaluation.risk_level,
             classification=evaluation.classification,
             reasons=list(evaluation.reasons),
+            **self._build_path_metadata(executable),
         )
 
     def _analyze_browser_extensions(
@@ -167,6 +197,9 @@ class BrowserSecurityService:
         scan_control: ScanControl | None,
         progress_callback: Callable[[str], None] | None,
     ) -> tuple[list[BrowserScanItem], int, list[BrowserScanError]]:
+        if browser == "Edge" and self.edge_extension_service is not None:
+            return self._analyze_edge_extensions(scan_control, progress_callback)
+
         results: list[BrowserScanItem] = []
         errors: list[BrowserScanError] = []
         inspected = 0
@@ -187,6 +220,31 @@ class BrowserSecurityService:
 
         return results, inspected, errors
 
+    def _analyze_edge_extensions(
+        self,
+        scan_control: ScanControl | None,
+        progress_callback: Callable[[str], None] | None,
+    ) -> tuple[list[BrowserScanItem], int, list[BrowserScanError]]:
+        results: list[BrowserScanItem] = []
+        errors: list[BrowserScanError] = []
+
+        if self.edge_extension_service is None:
+            return results, 0, errors
+
+        inventory = self.list_edge_extensions()
+        inspected = len(inventory.extensions)
+
+        for extension in inventory.extensions:
+            if not self._await_scan_control(scan_control, progress_callback):
+                return results, inspected, errors
+
+            if not extension.suspicious_reasons:
+                continue
+            results.append(self._edge_extension_to_browser_item(extension))
+
+        errors.extend(BrowserScanError(source=error.source, message=error.message) for error in inventory.errors)
+        return results, inspected, errors
+
     def _extension_roots(self, browser: str) -> list[Path]:
         local_appdata = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
         roaming = Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming")))
@@ -202,10 +260,9 @@ class BrowserSecurityService:
         return []
 
     def _analyze_extension_manifest(self, browser: str, manifest_path: Path) -> BrowserScanItem | None:
-        try:
-            data = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except Exception as error:
-            log_warning(self.logger, f"Falha ao ler manifest da extensao: {manifest_path} | {error}")
+        data = self.browser_analyzer.load_manifest(manifest_path)
+        if data is None:
+            log_warning(self.logger, f"Falha ao ler manifest da extensao: {manifest_path}")
             return None
 
         name = str(data.get("name") or "sem_nome").strip()
@@ -231,7 +288,14 @@ class BrowserSecurityService:
             score += 15
             reasons.append("Acesso amplo a todos os sites")
 
-        evaluation = self.heuristic_engine.build_custom_evaluation(score, reasons)
+        extension_signals = self.browser_analyzer.analyze_manifest(manifest_path, data)
+        extension_signals.extend(self.browser_analyzer.analyze_extension_scripts(manifest_path.parent))
+        assessment = self.risk_engine.assess(base_score=score, signals=extension_signals)
+
+        combined_reasons = list(dict.fromkeys([*reasons, *[signal.reason for signal in extension_signals]]))
+        combined_reasons.append(f"Acao recomendada: {assessment.recommended_action.value}")
+
+        evaluation = self.heuristic_engine.build_custom_evaluation(assessment.score, combined_reasons)
         if evaluation.classification == ThreatClassification.TRUSTED:
             return None
 
@@ -244,7 +308,61 @@ class BrowserSecurityService:
             risk_level=evaluation.risk_level,
             classification=evaluation.classification,
             reasons=list(evaluation.reasons),
+            recommended_action=assessment.recommended_action.value,
+            threat_category=self._extract_browser_category(combined_reasons),
+            analysis_module="browser_security",
+            detected_signals=list(combined_reasons),
+            **self._build_path_metadata(manifest_path.parent),
         )
+
+    def _edge_extension_to_browser_item(self, extension: EdgeExtensionRecord) -> BrowserScanItem:
+        evaluation = self.heuristic_engine.build_custom_evaluation(
+            min(100, max(35, 20 + len(extension.suspicious_reasons) * 10)),
+            extension.suspicious_reasons,
+        )
+        return BrowserScanItem(
+            browser="Edge",
+            item_type="Extensao Edge",
+            name=extension.name,
+            path=extension.install_path,
+            score=evaluation.score,
+            risk_level=evaluation.risk_level,
+            classification=evaluation.classification,
+            reasons=list(evaluation.reasons),
+            profile_name=extension.profile_name,
+            extension_id=extension.extension_id,
+            version=extension.version,
+            status=extension.status,
+            recommended_action="revisao_manual" if evaluation.score < 70 else "quarentena_recomendada",
+            threat_category=self._extract_browser_category(extension.suspicious_reasons),
+            analysis_module="browser_security",
+            detected_signals=list(extension.suspicious_reasons),
+            **self._build_path_metadata(extension.install_path),
+        )
+
+    def list_edge_extensions(self) -> EdgeExtensionInventory:
+        """Retorna o inventario detalhado de extensoes do Edge."""
+        if self.edge_extension_service is None:
+            return EdgeExtensionInventory()
+        return self.edge_extension_service.list_extensions()
+
+    def disable_edge_extension(self, extension: EdgeExtensionRecord, *, user_confirmed: bool) -> EdgeExtensionActionResult:
+        """Encaminha a desativacao de uma extensao Edge para o servico dedicado."""
+        if self.edge_extension_service is None:
+            raise RuntimeError("Servico de extensoes do Edge indisponivel.")
+        return self.edge_extension_service.disable_extension(extension, user_confirmed=user_confirmed)
+
+    def quarantine_edge_extension(self, extension: EdgeExtensionRecord, *, user_confirmed: bool) -> EdgeExtensionActionResult:
+        """Encaminha o isolamento de uma extensao Edge para o servico dedicado."""
+        if self.edge_extension_service is None:
+            raise RuntimeError("Servico de extensoes do Edge indisponivel.")
+        return self.edge_extension_service.quarantine_extension(extension, user_confirmed=user_confirmed)
+
+    def remove_edge_extension(self, extension: EdgeExtensionRecord, *, user_confirmed: bool) -> EdgeExtensionActionResult:
+        """Encaminha a remocao segura de uma extensao Edge para o servico dedicado."""
+        if self.edge_extension_service is None:
+            raise RuntimeError("Servico de extensoes do Edge indisponivel.")
+        return self.edge_extension_service.remove_extension(extension, user_confirmed=user_confirmed)
 
     def _analyze_hijack_signals(self, browser: str) -> tuple[list[BrowserScanItem], int, list[BrowserScanError]]:
         results: list[BrowserScanItem] = []
@@ -291,15 +409,21 @@ class BrowserSecurityService:
         reasons: list[str] = []
 
         homepage = str(data.get("homepage") or "")
-        if homepage and self._is_suspicious_url(homepage):
-            score += 30
-            reasons.append("Homepage aponta para dominio suspeito")
+        if homepage:
+            homepage_assessment = self.url_threat_service.assess_url(homepage)
+            if homepage_assessment.suspicious:
+                score += max(20, min(homepage_assessment.score, 40))
+                reasons.append("Homepage aponta para dominio suspeito")
+                reasons.extend(homepage_assessment.reasons)
 
         default_search = data.get("default_search_provider") or {}
         search_url = str(default_search.get("search_url") or "")
-        if search_url and self._is_suspicious_url(search_url):
-            score += 30
-            reasons.append("Mecanismo de busca padrao aponta para dominio suspeito")
+        if search_url:
+            search_assessment = self.url_threat_service.assess_url(search_url)
+            if search_assessment.suspicious:
+                score += max(20, min(search_assessment.score, 40))
+                reasons.append("Mecanismo de busca padrao aponta para dominio suspeito")
+                reasons.extend(search_assessment.reasons)
 
         evaluation = self.heuristic_engine.build_custom_evaluation(score, reasons)
         if evaluation.classification == ThreatClassification.TRUSTED:
@@ -314,6 +438,7 @@ class BrowserSecurityService:
             risk_level=evaluation.risk_level,
             classification=evaluation.classification,
             reasons=list(evaluation.reasons),
+            **self._build_path_metadata(preferences_path),
         )
 
     def _analyze_proxy_configuration(self, browser: str) -> tuple[BrowserScanItem | None, int]:
@@ -357,6 +482,7 @@ class BrowserSecurityService:
                 risk_level=evaluation.risk_level,
                 classification=evaluation.classification,
                 reasons=list(evaluation.reasons),
+                **self._build_path_metadata(None),
             ),
             1,
         )
@@ -393,6 +519,7 @@ class BrowserSecurityService:
                 risk_level=evaluation.risk_level,
                 classification=evaluation.classification,
                 reasons=list(evaluation.reasons),
+                **self._build_path_metadata(desktop),
             ),
             inspected,
         )
@@ -465,18 +592,14 @@ class BrowserSecurityService:
                     risk_level=evaluation.risk_level,
                     classification=evaluation.classification,
                     reasons=list(evaluation.reasons),
+                    **self._build_path_metadata(file_path),
                 )
             )
 
         return results, inspected, errors
 
     def _is_suspicious_url(self, url: str) -> bool:
-        lowered = url.lower()
-        if any(service in lowered for service in ("bit.ly", "tinyurl", "t.co", "is.gd")):
-            return True
-        if re.search(r"[0-9][a-z]*[0-9]", lowered) and any(brand in lowered for brand in ("google", "microsoft", "paypal", "banco")):
-            return True
-        return False
+        return self.url_threat_service.is_suspicious_url(url)
 
     def _await_scan_control(
         self,
@@ -497,3 +620,41 @@ class BrowserSecurityService:
     def _emit_progress(self, progress_callback: Callable[[str], None] | None, message: str) -> None:
         if progress_callback is not None:
             progress_callback(message)
+
+    def _extract_browser_category(self, reasons: list[str]) -> str:
+        lowered = " | ".join(reasons).lower()
+        if "cookie" in lowered or "spy" in lowered:
+            return "spyware"
+        if "proxy" in lowered or "all_urls" in lowered:
+            return "browser_hijack"
+        if "base64" in lowered or "ofusc" in lowered:
+            return "script_js_suspeito"
+        if "permiss" in lowered:
+            return "extensao_suspeita"
+        return "browser_risco"
+
+    def _build_path_metadata(self, path: Path | None) -> _PathMetadata:
+        """Monta metadados de caminho para distinguir snapshot da varredura e estado atual."""
+        now = datetime.now()
+        if path is None:
+            return {
+                "original_path": None,
+                "detected_at": now,
+                "existed_at_scan": None,
+                "filesystem_item_type": "indisponivel",
+            }
+
+        exists = path.exists()
+        item_type = "inexistente"
+        if exists:
+            if path.is_file():
+                item_type = "arquivo"
+            elif path.is_dir():
+                item_type = "pasta"
+
+        return {
+            "original_path": path,
+            "detected_at": now,
+            "existed_at_scan": exists,
+            "filesystem_item_type": item_type,
+        }
