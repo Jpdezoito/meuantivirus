@@ -21,6 +21,8 @@ from app.services.edge_extension_models import (
 )
 from app.utils.logger import log_error, log_info, log_warning
 
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+
 
 class EdgeExtensionService:
     """Enumera, audita e remedia extensoes do Edge com validacoes fortes de caminho."""
@@ -151,6 +153,7 @@ class EdgeExtensionService:
                 text=True,
                 timeout=5,
                 check=False,
+                creationflags=_CREATE_NO_WINDOW,
             )
         except Exception as error:
             log_warning(self.logger, f"Falha ao verificar processo do Edge: {error}")

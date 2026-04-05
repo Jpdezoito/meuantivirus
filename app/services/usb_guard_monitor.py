@@ -24,6 +24,8 @@ from app.services.risk_engine import RiskEngine, RiskSignal
 from app.services.usb_guard_models import UsbSecurityAlert
 from app.utils.logger import log_info, log_security_event, log_warning
 
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+
 
 class UsbGuardMonitorService:
     """Monitora dispositivos USB e sinais de HID injection (BadUSB)."""
@@ -289,6 +291,7 @@ class UsbGuardMonitorService:
                 text=True,
                 timeout=6,
                 check=False,
+                creationflags=_CREATE_NO_WINDOW,
             )
         except Exception:
             return []

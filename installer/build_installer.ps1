@@ -20,12 +20,22 @@ if (-not (Test-Path $distExe)) {
 }
 
 if (-not (Test-Path $IsccPath)) {
-    throw "ISCC.exe nao encontrado em '$IsccPath'. Instale o Inno Setup 6 ou informe -IsccPath."
+    $candidates = @(
+        "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
+        "C:\Program Files\Inno Setup 6\ISCC.exe",
+        "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+    )
+    $resolved = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($resolved) {
+        $IsccPath = $resolved
+    }
+    else {
+        throw "ISCC.exe nao encontrado em '$IsccPath'. Instale o Inno Setup 6 ou informe -IsccPath."
+    }
 }
 
 $arguments = @(
     "/DMyAppVersion=$AppVersion",
-    "/DMyAppDistDir=..\dist\SentinelaPC",
     $issPath
 )
 

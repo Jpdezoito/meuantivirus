@@ -27,6 +27,8 @@ from app.services.network_intrusion_models import NetworkIntrusionAlert
 from app.services.risk_engine import RiskEngine, RiskSignal
 from app.utils.logger import log_info, log_security_event, log_warning
 
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+
 
 class NetworkIntrusionMonitorService:
     """Monitora conexoes TCP em polling e gera alertas de comportamento suspeito."""
@@ -473,7 +475,14 @@ class NetworkIntrusionMonitorService:
         ]
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=8, check=False)
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=8,
+                check=False,
+                creationflags=_CREATE_NO_WINDOW,
+            )
         except Exception as error:
             log_warning(self.logger, f"[NetGuard] Falha ao bloquear IP {remote_ip}: {error}")
             return False, None
@@ -519,7 +528,14 @@ class NetworkIntrusionMonitorService:
             f"name={rule_name}",
         ]
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=8, check=False)
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=8,
+                check=False,
+                creationflags=_CREATE_NO_WINDOW,
+            )
         except Exception as error:
             log_warning(self.logger, f"[NetGuard] Falha ao remover regra {rule_name}: {error}")
             return False

@@ -57,8 +57,9 @@ class SidebarNavigation(QWidget):
 
         base_dir = Path(__file__).resolve().parents[2]
         logo_candidates = [
-            base_dir / "sentinelapc.png",
+            base_dir / "app" / "assets" / "branding" / "sentinelapc.png",
             base_dir / "app" / "assets" / "branding" / "logo-app-256.png",
+            base_dir / "sentinelapc.png",
         ]
         for logo_path in logo_candidates:
             if not logo_path.exists():

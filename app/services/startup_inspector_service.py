@@ -23,6 +23,8 @@ if sys.platform == "win32":
 else:
     winreg = None
 
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+
 
 class StartupInspectorService:
     """Centraliza a leitura das principais fontes de inicializacao automatica."""
@@ -296,6 +298,7 @@ class StartupInspectorService:
                 errors="replace",
                 check=False,
                 timeout=30,
+                creationflags=_CREATE_NO_WINDOW,
             )
         except (OSError, subprocess.SubprocessError) as error:
             self._register_error("Tarefas Agendadas", f"Falha ao consultar tarefas agendadas. | detalhe: {error}", errors)

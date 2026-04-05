@@ -24,6 +24,46 @@ if ($Clean) {
     if (Test-Path "dist\SentinelaPC") { Remove-Item -Recurse -Force "dist\SentinelaPC" }
 }
 
+$iconSourcePng = Join-Path $repoRoot "sentinelapc.png"
+$brandingPng = Join-Path $repoRoot "app\assets\branding\sentinelapc.png"
+$iconTargetIco = Join-Path $repoRoot "app\assets\branding\sentinelapc.ico"
+if (-not (Test-Path $iconSourcePng)) {
+    throw "Arquivo de icone origem nao encontrado em '$iconSourcePng'."
+}
+
+Copy-Item -Path $iconSourcePng -Destination $brandingPng -Force
+
+$hasPillow = $true
+try {
+    & $PythonExe -c "import PIL" *> $null
+}
+catch {
+    $hasPillow = $false
+}
+
+if (-not $hasPillow) {
+    & $PythonExe -m pip install Pillow
+}
+
+$iconBuildScript = @"
+from pathlib import Path
+from PIL import Image
+
+source = Path(r'$iconSourcePng')
+target = Path(r'$iconTargetIco')
+target.parent.mkdir(parents=True, exist_ok=True)
+
+with Image.open(source) as image:
+    image = image.convert('RGBA')
+    image.save(target, format='ICO', sizes=[(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)])
+"@
+
+& $PythonExe -c $iconBuildScript
+
+if (-not (Test-Path $iconTargetIco)) {
+    throw "Falha ao gerar icone ICO em '$iconTargetIco'."
+}
+
 $hiddenImports = @(
     "app.services.analyzer_behavior",
     "app.services.analyzer_browser",
@@ -53,7 +93,7 @@ $pyInstallerArgs = @(
     "--windowed",
     "--noconsole",
     "--name", "SentinelaPC",
-    "--icon", "app\assets\branding\logo-installer.ico",
+    "--icon", "app\assets\branding\sentinelapc.ico",
     "--version-file", "installer\version-info.txt",
     "--paths", ".",
     "--add-data", "app;app",
@@ -73,6 +113,8 @@ if (-not (Test-Path $exePath)) {
 }
 
 $requiredPaths = @(
+    "dist\SentinelaPC\_internal\app\assets\branding\sentinelapc.png",
+    "dist\SentinelaPC\_internal\app\assets\branding\sentinelapc.ico",
     "dist\SentinelaPC\_internal\app\assets\branding\logo-app-256.png",
     "dist\SentinelaPC\_internal\app\data",
     "dist\SentinelaPC\_internal\installer"

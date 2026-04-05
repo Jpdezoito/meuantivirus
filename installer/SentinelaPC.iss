@@ -18,17 +18,13 @@
 	#define MyAppExeName "SentinelaPC.exe"
 #endif
 #ifndef MyAppDistDir
-	#define MyAppDistDir "..\dist\SentinelaPC"
+	#define MyAppDistDir AddBackslash(SourcePath) + "..\dist\SentinelaPC"
 #endif
 #ifndef MyAppAppId
 	#define MyAppAppId "{{8B67F8FA-1A3E-4C8F-9E4E-9E5A2C5C61A1}"
 #endif
 
 #define MyAppDataDir "{localappdata}\" + MyAppName
-
-#ifnexist "{#MyAppDistDir}\{#MyAppExeName}"
-	#error "Build nao encontrado. Gere o executavel antes: dist\\SentinelaPC\\SentinelaPC.exe"
-#endif
 
 [Setup]
 AppId={#MyAppAppId}
@@ -53,7 +49,7 @@ OutputBaseFilename=SentinelaPC-Setup-{#MyAppVersion}
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
-SetupIconFile=..\app\assets\branding\logo-installer.ico
+SetupIconFile=..\app\assets\branding\sentinelapc.ico
 UninstallDisplayName={#MyAppName}
 SetupLogging=yes
 
@@ -91,7 +87,7 @@ Name: "{group}\Desinstalar {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-Name: "{app}\{#MyAppExeName}"; Description: "Executar {#MyAppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Description: "Executar {#MyAppName}"; Flags: nowait postinstall skipifsilent
 
 [Code]
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

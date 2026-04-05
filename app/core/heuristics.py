@@ -487,9 +487,9 @@ class HeuristicEngine:
             + "\"; "
             "if ($sig.SignerCertificate -and $sig.Status -eq 'Valid') { $sig.SignerCertificate.Subject }"
         )
-            ps_kwargs: dict[str, object] = {}
-            if sys.platform == "win32":
-                ps_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        ps_kwargs: dict[str, object] = {}
+        if sys.platform == "win32":
+            ps_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
         try:
             completed = subprocess.run(
@@ -498,7 +498,7 @@ class HeuristicEngine:
                 text=True,
                 timeout=2,
                 check=False,
-                    **ps_kwargs,
+                **ps_kwargs,
             )
         except (OSError, subprocess.SubprocessError):
             self._signature_cache[path_text] = None

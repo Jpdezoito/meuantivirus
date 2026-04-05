@@ -62,13 +62,18 @@ def main() -> int:
     app.setFont(app_font)
     app.setStyleSheet(build_stylesheet())
 
-    app_icon_path = context.paths.resource_dir / "app" / "assets" / "branding" / "logo-app-256.png"
-    if app_icon_path.exists():
+    branding_dir = context.paths.resource_dir / "app" / "assets" / "branding"
+    icon_candidates = [
+        branding_dir / "sentinelapc.png",
+        branding_dir / "logo-app-256.png",
+    ]
+    app_icon_path = next((path for path in icon_candidates if path.exists()), None)
+    if app_icon_path is not None:
         icon = QIcon(str(app_icon_path))
         app.setWindowIcon(icon)
 
     window = MainWindow(context)
-    if app_icon_path.exists():
+    if app_icon_path is not None:
         window.setWindowIcon(QIcon(str(app_icon_path)))
     window.show()
 
