@@ -5,5 +5,4 @@ psutil>=6.1,<8.0
 send2trash>=1.8,<2.0
 msal>=1.31,<2.0
 google-auth-oauthlib>=1.2,<2.0
-pyside6-fontawesome5>=5.15,<6.0
 qtawesome>=1.2,<2.0

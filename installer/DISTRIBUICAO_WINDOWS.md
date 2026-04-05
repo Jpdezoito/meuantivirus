@@ -1,153 +1,122 @@
 # Distribuicao do SentinelaPC no Windows
 
-Este guia prepara o projeto para desenvolvimento local e geracao de executavel com PyInstaller.
+Este guia entrega um fluxo profissional de distribuicao Windows com:
 
-## 1. Requirements do projeto
+- build do executavel (`PyInstaller`, modo `onedir`);
+- instalador (`Inno Setup`) com atalhos e desinstalacao;
+- validacao pos-instalacao fora do ambiente de desenvolvimento.
 
-Arquivo criado:
+## 1. Arquivos de build e instalacao
 
-- `requirements.txt`: dependencias reais de execucao.
-- `installer/requirements-build.txt`: dependencias de build, incluindo PyInstaller.
+- `installer/requirements-build.txt`: dependencias de empacotamento.
+- `installer/build_exe.ps1`: gera `dist/SentinelaPC/SentinelaPC.exe` com assets e modulos.
+- `installer/SentinelaPC.iss`: script do instalador Inno Setup.
+- `installer/build_installer.ps1`: compila o `.iss` via `ISCC.exe`.
+- `installer/verify_install.ps1`: valida instalacao (arquivos, pastas e opcionalmente abre o app).
+- `installer/version-info.txt`: metadados de versao do executavel.
 
-## 2. Criar ambiente virtual
+## 2. Preparar ambiente
 
 Na raiz do projeto:
 
 ```powershell
-cd "C:\Users\José Paulo Siqueira\Desktop\antvirus\SentinelaPC"
 python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r installer\requirements-build.txt
 ```
 
-Se quiser ativar o ambiente no PowerShell:
+## 3. Gerar executavel (PyInstaller)
+
+Comando recomendado:
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
+.\installer\build_exe.ps1 -PythonExe ".\.venv\Scripts\python.exe" -InstallBuildDeps -Clean
 ```
 
-## 3. Instalar dependencias
+Resultado esperado:
 
-Somente dependencias de execucao:
+- `dist\SentinelaPC\SentinelaPC.exe`
+- pacote completo `onedir` com `app`, `installer` e recursos visuais.
+
+## 4. Gerar instalador Windows
+
+Com Inno Setup 6 instalado:
 
 ```powershell
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+.\installer\build_installer.ps1 -AppVersion "0.1.0"
 ```
 
-Dependencias para build do executavel:
+Resultado esperado:
+
+- `dist\installer\SentinelaPC-Setup-0.1.0.exe`
+
+## 5. Estrutura de instalacao
+
+Executaveis:
+
+- `{autopf}\SentinelaPC\`
+
+Dados gravaveis do usuario (separados de `Program Files`):
+
+- `{localappdata}\SentinelaPC\logs`
+- `{localappdata}\SentinelaPC\reports`
+- `{localappdata}\SentinelaPC\quarantine`
+- `{localappdata}\SentinelaPC\app\data`
+- `{localappdata}\SentinelaPC\config`
+
+## 6. Atalhos e desinstalacao
+
+O instalador cria:
+
+- atalho no Menu Iniciar;
+- atalho opcional na Area de Trabalho;
+- entrada de desinstalacao no Windows.
+
+Na desinstalacao:
+
+- arquivos do programa e atalhos sao removidos automaticamente;
+- dados do usuario em `LOCALAPPDATA\SentinelaPC` podem ser removidos opcionalmente por confirmacao.
+
+## 7. Validacao pos-instalacao
+
+Depois de instalar, execute:
 
 ```powershell
-python -m pip install --upgrade pip
-python -m pip install -r installer\requirements-build.txt
+.\installer\verify_install.ps1 -Launch
 ```
 
-## 4. Executar em modo desenvolvimento
+Esse script valida:
 
-Com o ambiente virtual ativo:
+- executavel instalado;
+- assets essenciais (logo);
+- pastas de logs, reports, quarantine e data;
+- abertura do aplicativo fora do VS Code.
 
-```powershell
-python main.py
-```
+## 8. Caminhos absolutos e portabilidade
 
-Sem ativar o ambiente:
+O app esta preparado para nao depender de caminhos fixos de desenvolvimento:
 
-```powershell
-.\.venv\Scripts\python.exe main.py
-```
+- recursos empacotados: baseados em `sys._MEIPASS`/diretorio do executavel;
+- dados gravaveis: `LOCALAPPDATA\SentinelaPC` quando empacotado.
 
-## 5. Gerar .exe com PyInstaller
-
-Instale primeiro as dependencias de build e depois rode o comando abaixo na raiz do projeto.
-
-```powershell
-python -m PyInstaller --noconfirm --clean --windowed --name SentinelaPC --icon "app\assets\branding\logo-installer.ico" --paths . --add-data "app;app" main.py
-```
-
-Observacao importante:
-
-- para o instalador com Inno Setup, prefira manter o modo padrao `onedir`, porque ele gera `dist\SentinelaPC\` com todos os arquivos prontos para copia.
-
-## 6. Comando inicial recomendado do PyInstaller
-
-Com ambiente virtual local:
-
-```powershell
-.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --windowed --name SentinelaPC --icon "app\assets\branding\logo-installer.ico" --paths . --add-data "app;app" main.py
-```
-
-Script pronto alternativo:
-
-```powershell
-.\installer\build_exe.ps1
-```
-
-## 7. Tratamento basico de caminhos no executavel
-
-O projeto foi ajustado para diferenciar:
-
-- caminho de recursos: usado para localizar o codigo e arquivos empacotados pelo PyInstaller;
-- caminho de runtime: usado para banco, logs, relatorios e quarentena.
-
-Com isso:
-
-- em desenvolvimento, tudo continua sendo salvo na pasta do projeto;
-- no executavel, os dados gravaveis passam a usar a pasta ao lado do `.exe`, evitando escrita dentro do diretorio temporario do PyInstaller.
-
-Arquivo ajustado:
+Arquivo-chave:
 
 - `app/core/config.py`
 
-## 8. Resultado esperado do build
+## 9. Preparacao para evolucoes futuras
 
-Depois do build, o PyInstaller normalmente gera:
+O instalador ja esta estruturado para expansoes como:
 
-- `dist\SentinelaPC\SentinelaPC.exe` no modo padrao `onedir`
-- `build\` com arquivos temporarios do processo
+- opcao de inicializacao com Windows;
+- modulos de monitoramento continuo;
+- integracoes adicionais (ex.: browser bridge).
 
-## 9. Observacoes importantes para Windows
+Essas evolucoes podem ser adicionadas no `.iss` sem quebrar o fluxo atual.
 
-- Execute o PowerShell com permissao adequada se quiser testar quarentena e restauracao em pastas protegidas.
-- O Windows Defender pode inspecionar o executavel gerado por ser um build local sem assinatura digital.
-- Se futuramente voce adicionar icone `.ico`, o comando pode receber `--icon caminho\arquivo.ico`.
+## 10. Fluxo final recomendado
 
-## 10. Instalador com Inno Setup
-
-Arquivo criado:
-
-- `installer\SentinelaPC.iss`
-
-### O que este script faz
-
-- instala o programa em `Program Files`;
-- cria atalho no Menu Iniciar;
-- oferece atalho opcional na Area de Trabalho;
-- cria as pastas `logs`, `quarantine`, `reports` e `app\data` em `LOCALAPPDATA\SentinelaPC`;
-- usa um `AppId` fixo para facilitar futuras atualizacoes.
-
-### Fluxo recomendado antes de gerar o instalador
-
-1. Gere o build `onedir` com PyInstaller.
-2. Confirme que a pasta `dist\SentinelaPC\` existe.
-3. Abra o arquivo `installer\SentinelaPC.iss` no Inno Setup Compiler.
-4. Compile o instalador.
-
-### Como compilar o instalador no Inno Setup
-
-No Inno Setup Compiler, abra o script:
-
-```powershell
-installer\SentinelaPC.iss
-```
-
-Se quiser compilar pela linha de comando, um exemplo comum e:
-
-```powershell
-"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "installer\SentinelaPC.iss"
-```
-
-### Observacoes importantes para empacotamento antes do instalador
-
-- gere primeiro o build com PyInstaller; o Inno Setup nao substitui essa etapa;
-- o script pressupoe o executavel em `dist\SentinelaPC\SentinelaPC.exe`;
-- como o aplicativo agora usa `LOCALAPPDATA\SentinelaPC` quando esta empacotado, ele nao depende de permissao de escrita em `Program Files`;
-- mantenha o mesmo `AppId` no script `.iss` nas proximas versoes para que upgrades funcionem corretamente;
-- quando houver icone `.ico`, inclua tanto no PyInstaller quanto em `SetupIconFile` no Inno Setup.
+1. `build_exe.ps1`
+2. `build_installer.ps1`
+3. instalar o `SentinelaPC-Setup-*.exe`
+4. `verify_install.ps1 -Launch`
