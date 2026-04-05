@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from logging import Logger
 from pathlib import Path
+from typing import Any
 
 from app.core.config import AppSettings
 
@@ -12,7 +13,7 @@ SECURITY_LEVEL = 35
 logging.addLevelName(SECURITY_LEVEL, "SECURITY")
 
 
-def _security(self: Logger, message: str, *args: object, **kwargs: object) -> None:
+def _security(self: Logger, message: str, *args: object, **kwargs: Any) -> None:
     """Adiciona ao logger um nivel proprio para eventos de seguranca."""
     if self.isEnabledFor(SECURITY_LEVEL):
         self._log(SECURITY_LEVEL, message, args, **kwargs)

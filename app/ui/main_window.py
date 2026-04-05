@@ -3328,6 +3328,18 @@ class MainWindow(QMainWindow):
             self._append_to_page("processes", ["[Quarentena] Confirmacao negada pelo usuario."])
             return
 
+        if selected_result.executable_path is None:
+            self._record_action_event(
+                policy,
+                "Executavel ausente",
+                "approved",
+                "failed",
+                "Processo sem caminho executavel valido para quarentena.",
+                correlation_id,
+            )
+            QMessageBox.warning(self, "Arquivo indisponivel", "O processo selecionado nao possui um executavel valido para quarentena.")
+            return
+
         try:
             quarantined_item = self.quarantine_service.quarantine_file(
                 selected_result.executable_path,
@@ -3499,6 +3511,18 @@ class MainWindow(QMainWindow):
         )
         if correlation_id is None:
             self._append_to_page("startup", ["[Quarentena] Confirmacao negada pelo usuario."])
+            return
+
+        if selected_result.executable_path is None:
+            self._record_action_event(
+                policy,
+                "Executavel ausente",
+                "approved",
+                "failed",
+                "Item de inicializacao sem executavel valido para quarentena.",
+                correlation_id,
+            )
+            QMessageBox.warning(self, "Arquivo indisponivel", "O item selecionado nao possui um executavel valido para quarentena.")
             return
 
         try:
@@ -3980,11 +4004,12 @@ class MainWindow(QMainWindow):
         self._visual_progress_page_id = page_id
         self._visual_progress_value = 0
         self._visual_progress_paused = False
-        target = self._get_progress_target_page(page_id)
-        if target is not None:
-            if page_id == "audit":
-                target.start_progress()
-            else:
+
+        if page_id == "audit":
+            self.audit_page.start_progress()
+        else:
+            target = self._get_operation_page(page_id)
+            if target is not None:
                 target.start_progress(task_name)
         self._visual_progress_timer.start()
 
@@ -4043,7 +4068,7 @@ class MainWindow(QMainWindow):
         self._visual_progress_page_id = None
         self._visual_progress_paused = False
 
-    def _get_progress_target_page(self, page_id: str):
+    def _get_progress_target_page(self, page_id: str) -> AuditPage | OperationPage | None:
         """Retorna a pagina que possui o componente visual de progresso."""
         if page_id == "audit":
             return self.audit_page

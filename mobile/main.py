@@ -621,7 +621,7 @@ async def main(page: ft.Page) -> None:
 
     # ── Seletor de pasta ──────────────────────────────────────────────────
 
-    file_picker = FilePicker()
+    file_picker = ft.FilePicker()
     page.services.append(file_picker)
 
     async def _pick_directory() -> None:

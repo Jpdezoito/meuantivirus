@@ -12,6 +12,10 @@ from typing import Optional
 from app.core.risk import RiskLevel, ThreatClassification
 from app.utils.logger import log_info, log_warning, log_error
 
+_NO_WINDOW_KWARGS: dict[str, object] = {}
+if hasattr(subprocess, "CREATE_NO_WINDOW"):
+    _NO_WINDOW_KWARGS["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 
 @dataclass
 class ProcessBehaviorRisk:
@@ -162,6 +166,7 @@ class BehaviorMonitor:
                 text=True,
                 timeout=2,
                 check=False,
+                **_NO_WINDOW_KWARGS,
             )
             return bool(output.stdout.strip())
         except Exception:
@@ -180,6 +185,7 @@ class BehaviorMonitor:
                 text=True,
                 timeout=2,
                 check=False,
+                **_NO_WINDOW_KWARGS,
             )
             count = int(output.stdout.strip() or "0")
             return count >= 3  # Múltiplos módulos criptográficos carregados
@@ -199,6 +205,7 @@ class BehaviorMonitor:
                 text=True,
                 timeout=2,
                 check=False,
+                **_NO_WINDOW_KWARGS,
             )
             
             # Também verificar registry direto
@@ -220,6 +227,7 @@ class BehaviorMonitor:
                 text=True,
                 timeout=2,
                 check=False,
+                **_NO_WINDOW_KWARGS,
             )
             count = int(output.stdout.strip() or "0")
             return count > 2  # Mais que poucas entradas suspeitas de inicialização
@@ -238,6 +246,7 @@ class BehaviorMonitor:
                 text=True,
                 timeout=2,
                 check=False,
+                **_NO_WINDOW_KWARGS,
             )
             count = int(output.stdout.strip() or "0")
             return count > 0  # Qualquer conexão "estranha"

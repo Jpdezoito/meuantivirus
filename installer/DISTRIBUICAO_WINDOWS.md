@@ -93,6 +93,10 @@ Esse script valida:
 - pastas de logs, reports, quarantine e data;
 - abertura do aplicativo fora do VS Code.
 
+Checklist manual complementar:
+
+- `installer/CHECKLIST_POS_INSTALACAO.md`
+
 ## 8. Caminhos absolutos e portabilidade
 
 O app esta preparado para nao depender de caminhos fixos de desenvolvimento:

@@ -24,6 +24,8 @@ from app.services.analyzer_browser import BrowserExtensionAnalyzer
 from app.services.risk_engine import RiskEngine
 from app.utils.logger import log_info, log_warning
 
+_CREATE_NO_WINDOW: int = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 
 class _PathMetadata(TypedDict):
     original_path: Path | None
@@ -454,6 +456,7 @@ class BrowserSecurityService:
                 text=True,
                 timeout=2,
                 check=False,
+                creationflags=_CREATE_NO_WINDOW,
             )
         except Exception:
             return None, 0
@@ -537,6 +540,7 @@ class BrowserSecurityService:
                 text=True,
                 timeout=2,
                 check=False,
+                creationflags=_CREATE_NO_WINDOW,
             )
             return completed.stdout.strip()
         except Exception:

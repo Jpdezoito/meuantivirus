@@ -2,6 +2,17 @@
   "include": [
     "."
   ],
+  "exclude": [
+    "**/node_modules",
+    "**/.venv",
+    "**/*.pyi",
+    "dist",
+    "build",
+    "logs",
+    "reports",
+    "quarantine",
+    "**/__pycache__"
+  ],
   "pythonPlatform": "Windows",
   "pythonVersion": "3.14",
   "venvPath": "C:/Users/José Paulo Siqueira/AppData/Local/Programs/Python",

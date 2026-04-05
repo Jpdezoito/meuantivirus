@@ -51,6 +51,7 @@ $pyInstallerArgs = @(
     "--noconfirm",
     "--clean",
     "--windowed",
+    "--noconsole",
     "--name", "SentinelaPC",
     "--icon", "app\assets\branding\logo-installer.ico",
     "--version-file", "installer\version-info.txt",

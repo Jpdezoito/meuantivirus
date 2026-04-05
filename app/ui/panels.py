@@ -222,6 +222,8 @@ class SystemStatusPanel(CardFrame):
 
         while self._metrics_grid.count():
             item = self._metrics_grid.takeAt(0)
+            if item is None:
+                continue
             widget = item.widget()
             if widget is not None:
                 widget.setParent(self)
