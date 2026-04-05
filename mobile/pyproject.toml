@@ -1,0 +1,22 @@
+[project]
+name = "sentinelapc-mobile"
+version = "1.2.0"
+description = "SentinelaPC Mobile"
+requires-python = ">=3.11"
+dependencies = [
+  "flet>=0.24.0",
+]
+
+[tool.flet]
+org = "com.sentinelapc"
+product = "SentinelaPC Mobile"
+company = "SentinelaPC"
+
+[tool.flet.app]
+path = "."
+assets = "assets"
+
+[tool.flet.android]
+icon = "assets/icon.png"
+adaptive_icon_background = "#111827"
+adaptive_icon_foreground = "assets/icon.png"

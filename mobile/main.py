@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import threading
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Callable
+from typing import Callable, cast
 
 import flet as ft
 from flet import FilePicker
+
+
+APP_NAME = "SentinelaPC Mobile"
+APP_VERSION = "1.2.0"
 
 
 # ── Modelos ────────────────────────────────────────────────────────────────────
@@ -45,6 +50,11 @@ SUSPICIOUS_NAME_PATTERNS = [
     "crack", "hack", "keygen", "patch_", "cheat", "mod_", "_mod",
     "injector", "spyware", "trojan", "rootkit", "stalkerware",
 ]
+
+DOUBLE_EXTENSION_PATTERN = re.compile(
+    r"\.(pdf|jpg|jpeg|png|gif|txt|doc|docx|xls|xlsx)\.(apk|exe|scr|bat|cmd|js|vbs|ps1|jar)$",
+    re.IGNORECASE,
+)
 
 # permissao -> (score, descricao legivel)
 DANGEROUS_APK_PERMISSIONS: dict[str, tuple[int, str]] = {
@@ -104,6 +114,10 @@ def scan_file(path: Path) -> ScanResult:
         score += 30
         reasons.append(f"Extensao potencialmente perigosa: {ext}")
 
+    if DOUBLE_EXTENSION_PATTERN.search(path.name):
+        score += 35
+        reasons.append("Arquivo com dupla extensao, possivel tentativa de mascaramento")
+
     if ext == ".apk":
         apk_score, apk_reasons = scan_apk_permissions(path)
         score += apk_score
@@ -121,6 +135,11 @@ def scan_file(path: Path) -> ScanResult:
         if age_hours < 24 and ext in DANGEROUS_EXTENSIONS:
             score += 15
             reasons.append("Arquivo perigoso baixado ou modificado recentemente")
+
+        size_bytes = path.stat().st_size
+        if ext in {".bat", ".cmd", ".ps1", ".vbs", ".js"} and size_bytes > 5 * 1024 * 1024:
+            score += 15
+            reasons.append("Script com tamanho anormalmente alto")
     except OSError:
         pass
 
@@ -201,7 +220,7 @@ def _risk_chip(risk: RiskLevel) -> ft.Container:
 # ── App ────────────────────────────────────────────────────────────────────────
 
 async def main(page: ft.Page) -> None:
-    page.title       = "SentinelaPC Mobile"
+    page.title       = APP_NAME
     page.bgcolor     = BG
     page.padding     = 0
     page.theme_mode  = ft.ThemeMode.DARK
@@ -376,10 +395,19 @@ async def main(page: ft.Page) -> None:
         content=ft.Row(
             controls=[
                 ft.Icon(ft.Icons.SECURITY_ROUNDED, color=ACCENT, size=28),
+                ft.Container(
+                    content=ft.Image(
+                        src="icon.png",
+                        width=30,
+                        height=30,
+                    ),
+                    border_radius=8,
+                    clip_behavior=ft.ClipBehavior.HARD_EDGE,
+                ),
                 ft.Column(
                     controls=[
                         ft.Text("SentinelaPC", size=17, weight=ft.FontWeight.BOLD, color=TEXT1),
-                        ft.Text("Protecao mobile", size=11, color=TEXT2),
+                        ft.Text(f"Protecao mobile  v{APP_VERSION}", size=11, color=TEXT2),
                     ],
                     spacing=0, tight=True,
                 ),
@@ -391,24 +419,35 @@ async def main(page: ft.Page) -> None:
         padding=ft.padding.symmetric(horizontal=20, vertical=14),
     )
 
+    folder_row_controls: list[ft.Control] = [
+        cast(ft.Control, dir_txt),
+        cast(
+            ft.Control,
+            ft.IconButton(
+                ft.Icons.FOLDER_OPEN_ROUNDED,
+                icon_color=ACCENT,
+                tooltip="Selecionar pasta",
+                on_click=lambda: page.run_task(_pick_directory),
+            ),
+        ),
+    ]
+
+    folder_controls: list[ft.Control] = [
+        cast(ft.Control, _label("PASTA PARA VERIFICAR")),
+        cast(
+            ft.Control,
+            ft.Row(
+                controls=folder_row_controls,
+                spacing=4,
+            ),
+        ),
+    ]
+
     folder_card = _card(
         ft.Column(
-            controls=[
-                _label("PASTA PARA VERIFICAR"),
-                ft.Row(
-                    controls=[
-                        dir_txt,
-                        ft.IconButton(
-                            ft.Icons.FOLDER_OPEN_ROUNDED,
-                            icon_color=ACCENT,
-                            tooltip="Selecionar pasta",
-                            on_click=lambda: _pick_directory(),
-                        ),
-                    ],
-                    spacing=4,
-                ),
-            ],
-            spacing=8, tight=True,
+            controls=folder_controls,
+            spacing=8,
+            tight=True,
         )
     )
 
@@ -486,4 +525,4 @@ async def main(page: ft.Page) -> None:
 
 
 if __name__ == "__main__":
-    ft.app(target=main)
+    ft.app(target=main, assets_dir="assets")
